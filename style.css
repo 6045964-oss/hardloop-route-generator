@@ -1022,6 +1022,33 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
 
 /* ---------- Functie 8: via een punt naar keuze ----------
    (eigen blok; los terug te draaien via de bijbehorende commit) */
+.pin--via span {
+  display: grid; place-items: center;
+  width: 34px; height: 34px;
+  border-radius: 50% 50% 50% 4px;
+  background: var(--orange);
+  border: 4px solid var(--ink);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 16px;
+  box-shadow: 0 3px 10px rgb(0 0 0 / .35);
+  animation: pop .45s var(--ease-spring) both;
+}
+.pref__actions { display: flex; gap: 8px; }
+.pref__actions .link-btn { flex: 1; }
+.pref__actions .link-btn--danger { flex: 0 0 auto; border-color: var(--alert); color: var(--alert); }
+.pref__actions [hidden] { display: none; }
+#btnVia[aria-pressed="true"] { background: var(--ink); color: var(--lime); border-color: var(--ink); }
+.map.is-picking { cursor: crosshair; }
+.map.is-picking::after {
+  content: '';
+  position: absolute; inset: 0;
+  z-index: 450;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 4px var(--orange);
+  animation: blink 1.4s steps(2) infinite;
+}
 
 /* ---------- Functie 9: paneel inklappen ----------
    (eigen blok; los terug te draaien via de bijbehorende commit) */

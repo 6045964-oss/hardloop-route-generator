@@ -425,6 +425,58 @@ test('functie 7: tijd in plaats van km', async () => {
 // Functie 8: via een punt naar keuze
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('functie 8: via een punt naar keuze', async () => {
+  const { context, page, calls, errors } = await openApp({ start: 'alphen' });
+  // Kiezen: knop, dan tikken op het zichtbare stuk kaart rechtsboven de start
+  await page.click('#btnVia');
+  check(/via-punt kiezen/i.test(await page.$eval('#notice', (e) => e.innerText)), 'melding "Via-punt kiezen" na tik op "Via punt"');
+  const box = await page.evaluate(() => {
+    const top = document.querySelector('.topbar').getBoundingClientRect().bottom;
+    const sheet = document.getElementById('sheet').getBoundingClientRect().top;
+    return { x: Math.round(innerWidth * 0.62), y: Math.round(top + (sheet - top) * 0.3) }; // links van de locatieknop
+  });
+  await page.mouse.click(box.x, box.y);
+  await page.waitForFunction(() => !!document.querySelector('.pin--via'));
+  const via = await page.evaluate(() => JSON.parse(localStorage.getItem('hrg.prefs.v1')).via);
+  check(Array.isArray(via), `via-punt gekozen en onthouden: ${via}`);
+  check(/via punt/.test(await page.$eval('#prefsSummary', (e) => e.textContent)), 'samenvatting noemt "via punt"');
+
+  const before = calls.length;
+  const r = await generate(page, 5);
+  const near = Math.min(...r.entry.coords.map(([la, ln]) => Math.hypot((la - via[0]) * 110574, (ln - via[1]) * 111320 * Math.cos((via[0] * Math.PI) / 180))));
+  const dev = (r.entry.distance - 5000) / 50;
+  check(near <= 100, `route gaat ${Math.round(near)} m langs het via-punt; ${(r.entry.distance / 1000).toFixed(2)} km (${dev >= 0 ? '+' : ''}${dev.toFixed(1)}%), ${calls.length - before} verzoeken`);
+  check(/✓ Gehaald: via-punt/.test(r.checks), `onder de route: "${r.checks}"`);
+  check(r.entry.overlap <= 30 || /dubbel/.test(r.meta), `niet dubbel: ${r.entry.overlap} m ("${r.meta}")`);
+  if (!REAL) {
+    const body = calls[before].body;
+    check(!body.options?.round_trip && body.coordinates.length >= 5 && body.continue_straight === true, `verzoek met ${body.coordinates.length} waypoints, continue_straight`);
+  }
+  await waitTiles(page);
+
+  // Te ver weg voor de afstand → melding met minimale afstand, geen verzoek
+  await page.evaluate(() => {
+    const p = JSON.parse(localStorage.getItem('hrg.prefs.v1'));
+    p.via = [52.1294 + 0.045, 4.6574]; // ~5 km noordelijk
+    localStorage.setItem('hrg.prefs.v1', JSON.stringify(p));
+  });
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  const n0 = calls.length;
+  await setDistance(page, 5);
+  await page.click('#btnGenerate');
+  await page.waitForFunction(() => !document.getElementById('notice').hidden);
+  const notice = await page.$eval('#notice', (e) => e.innerText.replace(/\s+/g, ' '));
+  check(/te ver weg/i.test(notice) && /minstens \d+(,\d)? km/.test(notice), `melding: "${notice.slice(0, 150)}"`);
+  check(calls.length === n0, 'geen ORS-verzoek gedaan');
+
+  // Weghalen
+  await page.click('#btnViaRemove');
+  check(!(await page.$('.pin--via')) && !/via punt/.test(await page.$eval('#prefsSummary', (e) => e.textContent)), 'via-punt weggehaald (pin weg, samenvatting bijgewerkt)');
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Functie 9: paneel inklappen

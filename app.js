@@ -2629,6 +2629,203 @@
   // Functie 8: via een punt naar keuze
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Een round trip kan in ORS niet via een punt, dus een eigen strategie: een lus door
+  // start en via-punt. Heen over de ene boog, terug over de andere, met één of twee
+  // tussenpunten per boog, zodat heen en terug over verschillende wegen gaan. De lengte
+  // stuurt via de omtrek van de lus (eigen lengtegeheugen). continue_straight voorkomt
+  // omkeren bij tussenpunten (gemeten: minder dubbel). Dubbel lopen vlak bij het via-punt
+  // telt niet (bijv. een punt aan het eind van een doodlopend pad).
+  {
+    const VIA_RATIO_KEY = 'hrg.lengthObs.via.v1';
+    const VIA_RATIO_PRIOR = 1.35;   // gemeten: ORS-afstand ÷ cirkelomtrek in Alphen en Utrecht
+    const VIA_NEAR_M = 100;         // route moet zo dicht langs het via-punt gaan
+    const VIA_MIN_FROM_START = 120; // dichterbij heeft een via-punt geen zin
+    const TWO_POINTS_ARC = 3000;    // bogen langer dan dit krijgen twee tussenpunten
+    const TAU = 2 * Math.PI;
+    let picking = false;
+    let marker = null;
+    let rowText = null;
+    let btnPick = null;
+    let btnRemove = null;
+
+    const MIN_WIDTH = 0.25;         // smalste lus: breedte = 1/4 van de afstand start–via
+
+    // Omtrek van een ellips (Ramanujan) en de halve breedte b die bij omtrek P hoort.
+    const ellipsePerimeter = (a, b) => Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+    function ellipseB(a, P) {
+      let lo = MIN_WIDTH * a;
+      let hi = a;
+      for (let i = 0; i < 40; i++) {
+        const mid = (lo + hi) / 2;
+        if (ellipsePerimeter(a, mid) < P) lo = mid; else hi = mid;
+      }
+      return (lo + hi) / 2;
+    }
+    const minPerimeter = (dist) => ellipsePerimeter(dist / 2, (MIN_WIDTH * dist) / 2);
+
+    // Tussenpunten op een lus door start en via; seed kiest de kant en verschuift de punten.
+    // Lang genoeg: een cirkel door beide punten. Korter: een ellips met start en via aan de
+    // uiteinden (heen over de ene, terug over de andere helft).
+    function viaWaypoints(start, via, perimeter, seed) {
+      const proj = makeProjector(start[0], start[1]);
+      const V = proj.fwd(via[0], via[1]);
+      const d = Math.hypot(V[0], V[1]);
+      const side = seed % 2 ? 1 : -1;
+      const ux = V[0] / d;
+      const uy = V[1] / d;
+      const jitter = ((seed % 7) - 3) * 0.06; // tot ±18% verschuiven: andere wegen per poging
+      const count = (len) => (len > TWO_POINTS_ARC ? 2 : 1);
+      if (perimeter < Math.PI * d) {
+        const a = d / 2;
+        const b = ellipseB(a, Math.max(perimeter, minPerimeter(d)));
+        const at = (t) => {
+          const x = a * Math.cos(t);
+          const y = b * Math.sin(t) * side;
+          return proj.inv(V[0] / 2 + ux * x - uy * y, V[1] / 2 + uy * x + ux * y);
+        };
+        const k = count(perimeter / 2);
+        const out = Array.from({ length: k }, (_, i) => at(Math.PI * (1 - (i + 1) / (k + 1) - jitter / k)));
+        const back = Array.from({ length: k }, (_, i) => at(-Math.PI * ((i + 1) / (k + 1) + jitter / k)));
+        return [start, ...out, via, ...back, start];
+      }
+      const R = perimeter / TAU;
+      const h = Math.sqrt(Math.max(0, R * R - (d / 2) ** 2));
+      const C = [V[0] / 2 - uy * side * h, V[1] / 2 + ux * side * h];
+      const angle = (P) => Math.atan2(P[1] - C[1], P[0] - C[0]);
+      const aS = angle([0, 0]);
+      const aV = angle(V);
+      const sweep1 = (((aV - aS) % TAU) + TAU) % TAU;
+      const arc = (a0, sweep) => {
+        const k = count(sweep * R);
+        return Array.from({ length: k }, (_, i) => a0 + sweep * ((i + 1) / (k + 1) + jitter / k));
+      };
+      const toLatLng = (a) => proj.inv(C[0] + R * Math.cos(a), C[1] + R * Math.sin(a));
+      return [start, ...arc(aS, sweep1).map(toLatLng), via, ...arc(aV, TAU - sweep1).map(toLatLng), start];
+    }
+
+    const viaStrategy = {
+      ratioKey: VIA_RATIO_KEY,
+      ratioPrior: VIA_RATIO_PRIOR,
+      askedRange: (ctx) => [minPerimeter(ctx.viaDist) * 1.02, Math.max(minPerimeter(ctx.viaDist) * 1.05, ctx.target * 1.1)],
+      body: (ctx, asked, seed) => {
+        const wps = viaWaypoints(ctx.start, ctx.via, asked, seed);
+        return {
+          coordinates: wps.map(([lat, lng]) => [lng, lat]),
+          radiuses: wps.map((_, i) => (i === 0 || i === wps.length - 1 ? 350 : -1)), // tussenpunten: dichtstbijzijnde weg
+          continue_straight: true,
+        };
+      },
+    };
+
+    // Kortst mogelijke rondje via dit punt: de smalste lus, maal hoeveel langer ORS die maakt.
+    function minimalMeters(dist) {
+      const p = minPerimeter(dist);
+      return p * predictLengthRatio(p * VIA_RATIO_PRIOR, VIA_RATIO_KEY, VIA_RATIO_PRIOR);
+    }
+
+    function render() {
+      const via = prefs.via;
+      if (marker) { map.removeLayer(marker); marker = null; }
+      if (via) {
+        marker = L.marker(via, {
+          icon: L.divIcon({ className: 'pin pin--via', html: '<span>V</span>', iconSize: [34, 34], iconAnchor: [17, 17] }),
+          keyboard: false, interactive: false, zIndexOffset: 400,
+        }).addTo(map);
+      }
+      const dist = via && state.start ? haversine(state.start.latlng, via) : null;
+      rowText.textContent = via
+        ? `Via-punt gekozen${dist !== null ? `, ${nf1.format(dist / 1000)} km van de start` : ''}.`
+        : 'Tik op "Via punt" en daarna op de kaart.';
+      btnPick.textContent = picking ? 'Tik op de kaart…' : via ? 'Verplaats' : 'Via punt';
+      btnPick.setAttribute('aria-pressed', String(picking));
+      btnRemove.hidden = !via;
+      renderPrefsSummary();
+    }
+
+    function stopPicking() {
+      picking = false;
+      map.getContainer().classList.remove('is-picking');
+      emit('map-pick', { active: false });
+      render();
+    }
+
+    hooks.mapClick = ((prev) => (e) => {
+      if (!picking) return prev(e);
+      setPref('via', [Math.round(e.latlng.lat * 1e5) / 1e5, Math.round(e.latlng.lng * 1e5) / 1e5]);
+      stopPicking();
+      hideNotice();
+      if (state.route && !state.run) clearRoute(); // oude route ging niet via dit punt
+      return true;
+    })(hooks.mapClick);
+
+    registerFeature({
+      id: 'via',
+      defaults: { via: null },
+      ui() {
+        const row = prefRow('via', 'Via een punt', '');
+        rowText = document.createElement('p');
+        rowText.className = 'pref__hint';
+        rowText.setAttribute('aria-live', 'polite');
+        const actions = document.createElement('div');
+        actions.className = 'pref__extra pref__actions';
+        btnPick = document.createElement('button');
+        btnPick.type = 'button';
+        btnPick.className = 'link-btn';
+        btnPick.id = 'btnVia';
+        btnRemove = document.createElement('button');
+        btnRemove.type = 'button';
+        btnRemove.className = 'link-btn link-btn--danger';
+        btnRemove.id = 'btnViaRemove';
+        btnRemove.textContent = 'Weghalen';
+        actions.append(btnPick, btnRemove);
+        row.append(rowText, actions);
+        btnPick.addEventListener('click', () => {
+          if (picking) { stopPicking(); hideNotice(); return; }
+          picking = true;
+          map.getContainer().classList.add('is-picking');
+          emit('map-pick', { active: true });
+          render();
+          showNotice('info', 'Via-punt kiezen', 'Tik op de kaart op de plek waar je rondje langs moet gaan.',
+            { action: { label: 'Annuleren', onClick: stopPicking } });
+        });
+        btnRemove.addEventListener('click', () => {
+          setPref('via', null);
+          if (picking) stopPicking();
+          render();
+        });
+        document.addEventListener('hrg:route-shown', render);
+        render();
+      },
+      active: () => Array.isArray(prefs.via),
+      label: () => 'via punt',
+      prepare(ctx) {
+        const dist = haversine(ctx.start, prefs.via);
+        if (dist < VIA_MIN_FROM_START) return; // vlak bij de start: gewoon een rondje
+        const minM = minimalMeters(dist);
+        if (ctx.target < minM * 0.97) {
+          const minKm = Math.ceil(minM / 500) / 2;
+          throw new AppError('Via-punt te ver weg',
+            `Dit punt ligt ${nf1.format(dist / 1000)} km van je start. Een rondje erlangs is minstens ${nfKm.format(minKm)} km. Kies een grotere afstand of een punt dichterbij.`);
+        }
+        ctx.strategy = viaStrategy;
+        ctx.via = prefs.via;
+        ctx.viaDist = dist;
+        ctx.overlapFree = [...ctx.overlapFree, prefs.via];
+      },
+      hard(cand) {
+        const proj = makeProjector(prefs.via[0], prefs.via[1]);
+        let best = Infinity;
+        for (const c of cand.coords) best = Math.min(best, Math.hypot(...proj.fwd(c[0], c[1])));
+        const m = Math.round(best);
+        return {
+          ok: m <= VIA_NEAR_M,
+          text: m <= VIA_NEAR_M ? 'via-punt' : `via-punt: ${m} m ervandaan`,
+          failText: `Het rondje komt maar tot ${m} m van je via-punt; daar ligt waarschijnlijk geen weg of pad.`,
+        };
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Functie 9: paneel inklappen
