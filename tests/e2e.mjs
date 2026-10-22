@@ -354,6 +354,41 @@ test('voorkeur 5: hoogteverschil', async () => {
 // Voorkeur 6: richting kiezen
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 6: richting kiezen', async () => {
+  const { context, page, calls, errors } = await openApp({ start: 'alphen' });
+  const DIRS = { N: 0, O: 90, Z: 180, W: 270 };
+  // Aandeel van de route aan de kant `deg` van het startpunt, onafhankelijk van de app berekend.
+  const share = (coords, deg) => {
+    const [la0, ln0] = coords[0];
+    const kx = 111320 * Math.cos((la0 * Math.PI) / 180);
+    const ux = Math.sin((deg * Math.PI) / 180), uy = Math.cos((deg * Math.PI) / 180);
+    let a = 0, t = 0;
+    for (let i = 1; i < coords.length; i++) {
+      const x0 = (coords[i - 1][1] - ln0) * kx, y0 = (coords[i - 1][0] - la0) * 110574;
+      const x1 = (coords[i][1] - ln0) * kx, y1 = (coords[i][0] - la0) * 110574;
+      const m = Math.hypot(x1 - x0, y1 - y0);
+      t += m;
+      if (((x0 + x1) / 2) * ux + ((y0 + y1) / 2) * uy > 0) a += m;
+    }
+    return a / t;
+  };
+  for (const dir of REAL ? ['N', 'Z'] : ['N', 'O', 'Z', 'W']) {
+    await choose(page, 'direction', dir);
+    const before = calls.length;
+    const r = await generate(page, 6);
+    const s = share(r.entry.coords, DIRS[dir]);
+    const dev = (r.entry.distance - 6000) / 60;
+    check(s >= 0.75 && Math.abs(dev) <= 5, `${dir}: ${pct(s)} van de route in die richting, afstand ${(r.entry.distance / 1000).toFixed(2)} km (${dev >= 0 ? '+' : ''}${dev.toFixed(1)}%), ${calls.length - before} verzoeken`);
+    check(/✓ Gehaald: richting/.test(r.checks), `${dir}: onder de route "${r.checks}"`);
+    if (!REAL) check(Array.isArray(calls[before].body.bearings), `${dir}: bearings in het verzoek (${JSON.stringify(calls[before].body.bearings)})`);
+  }
+  await choose(page, 'direction', 'any');
+  const r = await generate(page);
+  check(!/richting/.test(r.checks), 'maakt niet uit: geen richtingseis');
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Functie 7: tijd in plaats van km

@@ -2392,6 +2392,77 @@
   // Voorkeur 6: richting kiezen
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Gekozen: ORS round trip met "bearings". Dat zet de beginkoers van het rondje; het
+  // middelpunt ligt dan ~35° rechtsom van die koers (gemeten in Utrecht en Alphen). Vergeleken
+  // met tussenpunten op een cirkel (functie 8) en achteraf filteren op het middelpunt houdt dit
+  // de afstand het nauwkeurigst (lengte ±6% tegen ±10%) en loopt het veel minder vaak dubbel
+  // (11/16 tegen 2/16 niet dubbel); filteren kost te veel van de 8 verzoeken (~1 op 4 raak).
+  // Eis (prioriteit 3): minstens 75% van de route ligt aan die kant van het startpunt.
+  {
+    const DIRS = {
+      N: { deg: 0, name: 'noorden' },
+      O: { deg: 90, name: 'oosten' },
+      Z: { deg: 180, name: 'zuiden' },
+      W: { deg: 270, name: 'westen' },
+    };
+    const LOOP_OFFSET = 35;   // middelpunt van het rondje ligt zoveel graden rechtsom van de koers
+    const JITTER = 10;        // per poging ±2×10° variëren, voor andere vormen
+    const DIR_OK = 0.75;
+
+    // Aandeel van de route (in meters) aan de kant `deg` van het startpunt.
+    function shareTowards(coords, start, deg) {
+      const proj = makeProjector(start[0], start[1]);
+      const ux = Math.sin((deg * Math.PI) / 180);
+      const uy = Math.cos((deg * Math.PI) / 180);
+      let inside = 0;
+      let total = 0;
+      let prev = proj.fwd(coords[0][0], coords[0][1]);
+      for (let i = 1; i < coords.length; i++) {
+        const cur = proj.fwd(coords[i][0], coords[i][1]);
+        const m = Math.hypot(cur[0] - prev[0], cur[1] - prev[1]);
+        total += m;
+        if (((prev[0] + cur[0]) / 2) * ux + ((prev[1] + cur[1]) / 2) * uy > 0) inside += m;
+        prev = cur;
+      }
+      return total ? inside / total : 0;
+    }
+
+    registerFeature({
+      id: 'direction',
+      defaults: { direction: 'any' },
+      ui() {
+        const row = prefRow('direction', 'Richting', 'Het rondje ligt grotendeels aan deze kant van je startpunt.');
+        prefChoice(row, 'direction', [
+          { value: 'any', text: 'Maakt niet uit' },
+          { value: 'N', text: 'N', aria: 'Noord' },
+          { value: 'O', text: 'O', aria: 'Oost' },
+          { value: 'Z', text: 'Z', aria: 'Zuid' },
+          { value: 'W', text: 'W', aria: 'West' },
+        ]);
+      },
+      active: () => prefs.direction in DIRS,
+      label: () => `richting ${DIRS[prefs.direction].name}`,
+      request(body, ctx, seed) {
+        if (!(prefs.direction in DIRS) || !body.options || !body.options.round_trip) return;
+        const jitter = ((seed % 5) - 2) * JITTER;
+        const course = (DIRS[prefs.direction].deg - LOOP_OFFSET + jitter + 360) % 360;
+        body.bearings = [[Math.round(course), 90]]; // 90: ruime marge bij het vastpakken van de weg
+      },
+      analyze(cand, ctx) {
+        if (prefs.direction in DIRS) cand.stats.dirShare = shareTowards(cand.coords, ctx.start, DIRS[prefs.direction].deg);
+      },
+      hard(cand) {
+        const d = DIRS[prefs.direction];
+        const share = cand.stats.dirShare || 0;
+        return {
+          ok: share >= DIR_OK,
+          text: `richting ${d.name}: ${pct(share)} van de route`,
+          failText: `Maar ${pct(share)} van dit rondje ligt in het ${d.name}.`,
+        };
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Functie 7: tijd in plaats van km
