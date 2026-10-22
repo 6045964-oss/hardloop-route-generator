@@ -243,6 +243,21 @@ test('voorkeur 1: platteland', async () => {
 // Voorkeur 2: weinig bochten
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 2: weinig bochten', async () => {
+  const { context, page, calls, errors } = await openApp({ start: 'alphen' });
+  await setSwitch(page, 'turns', true);
+  const r = await generate(page, 6);
+  check(/weinig bochten: \d+ afslagen/.test(r.checks), `onder de route: "${r.checks}"`);
+  if (!REAL) {
+    const within = calls.filter((c) => Math.abs(c.distance - 6000) <= 300);
+    const chosen = calls.find((c) => Math.abs(c.distance - r.entry.distance) < 0.01);
+    const fewest = Math.min(...within.map((c) => c.stats.turns));
+    check(chosen && chosen.stats.turns <= fewest + 2, `gekozen: ${chosen && chosen.stats.turns} stappen; rustigste kandidaat binnen 5%: ${fewest} (${calls.length} verzoeken)`);
+  }
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Voorkeur 3: drukke hoofdwegen vermijden

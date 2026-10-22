@@ -2162,6 +2162,42 @@
   // Voorkeur 2: weinig bochten
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // ORS heeft hier geen optie voor: kandidaten scoren op het aantal afslagen en hoe scherp
+  // die zijn (uit de stappen van de routebeschrijving), per kilometer.
+  {
+    // Gewicht per staptype: scherp en omkeren tellen zwaarder, flauw en aanhouden lichter.
+    const TURN_WEIGHT = { 0: 1, 1: 1, 2: 1.6, 3: 1.6, 4: 0.4, 5: 0.4, 7: 0.8, 9: 2, 12: 0.3, 13: 0.3 };
+    const REAL_TURNS = new Set([0, 1, 2, 3, 7, 9]); // wat je echt als "afslag" voelt
+    const CALM_PER_KM = 4;    // tot zoveel gewogen bochten per km: voorkeur gehaald
+    const BUSY_PER_KM = 8;    // vanaf zoveel: slechtst mogelijke score
+    const TURNS_WEIGHT = 1;
+
+    registerFeature({
+      id: 'turns',
+      defaults: { fewTurns: false },
+      ui() {
+        prefSwitch(prefRow('turns', 'Weinig bochten', 'Liever lange rechte stukken dan steeds afslaan.'), 'fewTurns');
+      },
+      active: () => prefs.fewTurns,
+      label: () => 'weinig bochten',
+      analyze(cand) {
+        const km = Math.max(0.5, cand.distance / 1000);
+        const weighted = cand.steps.reduce((sum, st) => sum + (TURN_WEIGHT[st.t] || 0), 0);
+        cand.stats.turns = cand.steps.filter((st) => REAL_TURNS.has(st.t)).length;
+        cand.stats.turnsPerKm = Math.round((weighted / km) * 10) / 10;
+      },
+      soft(cand) {
+        const perKm = cand.stats.turnsPerKm;
+        return {
+          ok: perKm <= CALM_PER_KM,
+          score: clamp(perKm / BUSY_PER_KM, 0, 1),
+          weight: TURNS_WEIGHT,
+          text: `weinig bochten: ${cand.stats.turns} afslagen (${nf1.format(perKm)} per km)`,
+        };
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Voorkeur 3: drukke hoofdwegen vermijden
