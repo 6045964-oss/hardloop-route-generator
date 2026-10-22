@@ -2831,6 +2831,290 @@
   // Functie 9: paneel inklappen
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Telefoon (< 768 px): het paneel heeft drie standen.
+  //   collapsed  smalle balk (afstand/route + Genereer/Start, of tijdens het lopen de volgende
+  //              afslag + Stop); de kaart vult vrijwel het hele scherm
+  //   half       zoals voorheen (inhoud, max. 74% van het scherm)
+  //   full       alle instellingen en voorkeuren
+  // Het greepje is een knop: tikken = volgende stand, vegen = slepen met snappen.
+  {
+    const WIDE = window.matchMedia('(min-width: 768px)');
+    const ORDER = ['collapsed', 'half', 'full'];
+    const LABELS = { collapsed: 'ingeklapt', half: 'half open', full: 'helemaal open' };
+    const FLICK = 0.5; // px/ms: sneller vegen = door naar de volgende stand
+    const sheet = els.sheet;
+    let snap = 'half';
+    let handle = null;
+    let peek = null;
+    let restoreAfterPick = null;
+    let lastDragEnd = 0; // een klik direct na slepen is geen tik
+
+    const vh = () => (window.visualViewport ? window.visualViewport.height : window.innerHeight);
+    const topLimit = () => document.querySelector('.topbar').getBoundingClientRect().bottom + 8;
+
+    function heightFor(which) {
+      if (which === 'full') return Math.round(vh() - topLimit());
+      if (which === 'collapsed') { // de balk kan tijdens het slepen verborgen zijn: even tonen om te meten
+        const wasHidden = peek.hidden;
+        if (wasHidden) fillPeek();
+        peek.hidden = false;
+        const h = Math.round(peek.offsetTop + peek.offsetHeight + parseFloat(getComputedStyle(sheet).paddingBottom));
+        peek.hidden = wasHidden;
+        return h;
+      }
+      const prevH = sheet.style.height;
+      const prevMax = sheet.style.maxHeight;
+      sheet.style.height = 'auto';
+      sheet.style.maxHeight = '';
+      const h = sheet.offsetHeight;
+      sheet.style.height = prevH;
+      sheet.style.maxHeight = prevMax;
+      return h;
+    }
+
+    function setInert(which) {
+      const collapsed = which === 'collapsed';
+      peek.hidden = !collapsed;
+      [els.planView, els.runView].forEach((el) => { el.inert = collapsed; });
+    }
+
+    function updateHandle() {
+      handle.setAttribute('aria-label', `Paneel ${LABELS[snap]}. Tik om te ${snap === 'full' ? 'verkleinen' : 'vergroten'}, of veeg.`);
+      handle.setAttribute('aria-expanded', String(snap !== 'collapsed'));
+    }
+
+    function snapTo(which, { animate = true, refit = false } = {}) {
+      if (WIDE.matches) return;
+      const from = sheet.offsetHeight;
+      snap = which;
+      sheet.dataset.snap = which;
+      setInert(which);
+      if (which === 'collapsed') fillPeek();
+      const to = heightFor(which);
+      sheet.style.maxHeight = 'none';
+      sheet.classList.remove('is-snapping');
+      sheet.style.height = `${from}px`;
+      void sheet.offsetHeight;
+      const done = () => {
+        sheet.classList.remove('is-snapping');
+        if (snap === 'half' && which === 'half') { // half volgt de inhoud weer vanzelf
+          sheet.style.height = '';
+          sheet.style.maxHeight = '';
+        }
+        // Alleen ingeklapt inpassen: bij "half" of "volledig" blijft er te weinig kaart over.
+        if (refit && which === 'collapsed' && state.route && !state.run) {
+          const fit = () => {
+            map.invalidateSize({ pan: false }); // schermhoogte kan net veranderd zijn
+            fitRoute({ animate: !reducedMotion });
+          };
+          // Leaflet negeert een nieuwe zoom zolang een zoomanimatie loopt: dan daarna inpassen.
+          if (map._animatingZoom) map.once('zoomend', fit); else fit();
+        }
+        if (state.run && state.run.follow && state.userPos) focusOn(state.userPos, undefined, false);
+      };
+      if (animate && !reducedMotion && Math.abs(to - from) > 2) {
+        sheet.classList.add('is-snapping');
+        sheet.style.height = `${to}px`;
+        let finished = false;
+        const end = () => { if (!finished) { finished = true; done(); } };
+        sheet.addEventListener('transitionend', (e) => { if (e.propertyName === 'height') end(); }, { once: true });
+        setTimeout(end, 450);
+      } else {
+        sheet.style.height = `${to}px`;
+        done();
+      }
+      updateHandle();
+    }
+
+    // Inhoud van de smalle balk
+    function fillPeek() {
+      const running = !!state.run;
+      peek.querySelector('.peek__plan').hidden = running;
+      peek.querySelector('.peek__run').hidden = !running;
+      if (running) return mirrorRun();
+      const value = peek.querySelector('.peek__value');
+      const label = peek.querySelector('.peek__label');
+      const go = peek.querySelector('.peek__go');
+      if (state.route) {
+        value.innerHTML = `${escapeHtml(els.resultKm.textContent)}<small>km</small>`;
+        label.textContent = 'Jouw rondje';
+        go.textContent = 'Start';
+        go.className = 'btn btn--go peek__go';
+      } else {
+        const unit = document.querySelector('.stepper__unit').textContent;
+        value.innerHTML = `${escapeHtml(els.distanceInput.value)}<small>${escapeHtml(unit)}</small>`;
+        label.textContent = unit === 'min' ? 'Tijd' : 'Afstand';
+        go.textContent = state.generating ? 'Zoeken…' : 'Genereer';
+        go.className = 'btn btn--primary peek__go';
+      }
+      go.disabled = state.generating;
+    }
+
+    function mirrorRun() {
+      const run = peek.querySelector('.peek__run');
+      run.querySelector('.peek__dist').textContent = els.navDist.hidden ? '' : els.navDist.textContent;
+      run.querySelector('.peek__what').textContent = els.navWhat.textContent;
+      run.querySelector('.peek__left').textContent = `Nog ${els.statLeft.textContent} km`;
+      run.dataset.state = els.runStatus.dataset.state;
+    }
+
+    // Slepen en tikken op het greepje (en op de smalle balk)
+    function attachDrag(el) {
+      let start = null;
+      el.addEventListener('pointerdown', (e) => {
+        if (WIDE.matches || e.button > 0 || e.target.closest('button:not(.sheet__handle)')) return;
+        start = { y: e.clientY, h: sheet.offsetHeight, t: performance.now(), moved: false, last: e.clientY, lastT: performance.now(), v: 0 };
+        el.setPointerCapture(e.pointerId);
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!start) return;
+        const dy = start.y - e.clientY;
+        if (!start.moved && Math.abs(dy) < 6) return;
+        if (!start.moved) {
+          start.moved = true;
+          sheet.classList.remove('is-snapping');
+          sheet.style.maxHeight = 'none';
+          sheet.dataset.snap = 'drag';
+          setInert('drag');
+        }
+        const now = performance.now();
+        start.v = (start.last - e.clientY) / Math.max(1, now - start.lastT);
+        start.last = e.clientY;
+        start.lastT = now;
+        const minH = heightFor('collapsed');
+        sheet.style.height = `${clamp(start.h + dy, minH, heightFor('full'))}px`;
+      });
+      const finish = (e) => {
+        if (!start) return;
+        const s0 = start;
+        start = null;
+        if (el.hasPointerCapture && el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+        if (!s0.moved) return; // tik: afgehandeld door 'click'
+        lastDragEnd = performance.now();
+        const h = sheet.offsetHeight;
+        const heights = ORDER.map((w) => [w, w === 'half' ? Math.min(heightFor('half'), heightFor('full')) : heightFor(w)]);
+        let target;
+        if (Math.abs(s0.v) > FLICK) {
+          const sorted = heights.slice().sort((a, b) => a[1] - b[1]);
+          target = s0.v > 0
+            ? (sorted.find(([, hh]) => hh > h + 4) || sorted[sorted.length - 1])[0]
+            : (sorted.slice().reverse().find(([, hh]) => hh < h - 4) || sorted[0])[0];
+        } else {
+          target = heights.reduce((a, b) => (Math.abs(b[1] - h) < Math.abs(a[1] - h) ? b : a))[0];
+        }
+        snap = 'drag';
+        snapTo(target, { refit: true });
+      };
+      el.addEventListener('pointerup', finish);
+      el.addEventListener('pointercancel', finish);
+    }
+
+    registerFeature({
+      id: 'sheet',
+      ui() {
+        // Greepje → knop
+        const grip = sheet.querySelector('.sheet__grip');
+        handle = document.createElement('button');
+        handle.type = 'button';
+        handle.className = 'sheet__handle';
+        handle.setAttribute('aria-controls', 'sheet');
+        handle.innerHTML = '<span class="sheet__grip" aria-hidden="true"></span>';
+        grip.replaceWith(handle);
+
+        // Smalle balk (na de melding, vóór de inhoud)
+        peek = document.createElement('div');
+        peek.className = 'peek';
+        peek.id = 'peek';
+        peek.hidden = true;
+        peek.innerHTML = `
+          <div class="peek__plan">
+            <p class="peek__text"><span class="peek__label"></span><span class="peek__value"></span></p>
+            <button type="button" class="btn btn--primary peek__go"></button>
+          </div>
+          <div class="peek__run" hidden>
+            <p class="peek__text"><span class="peek__dist"></span><span class="peek__what"></span><span class="peek__left"></span></p>
+            <button type="button" class="btn btn--stop peek__stop">Stop</button>
+          </div>`;
+        els.notice.after(peek);
+        peek.querySelector('.peek__go').addEventListener('click', () => {
+          if (state.route) els.btnStart.click();
+          else els.btnGenerate.click();
+        });
+        peek.querySelector('.peek__stop').addEventListener('click', () => els.btnStop.click());
+
+        handle.addEventListener('click', () => {
+          if (performance.now() - lastDragEnd < 350) return;
+          snapTo(ORDER[(ORDER.indexOf(snap) + 1) % ORDER.length], { refit: true });
+        });
+        handle.addEventListener('keydown', (e) => {
+          const i = ORDER.indexOf(snap);
+          if (e.key === 'ArrowUp' && i < 2) { e.preventDefault(); snapTo(ORDER[i + 1], { refit: true }); }
+          if (e.key === 'ArrowDown' && i > 0) { e.preventDefault(); snapTo(ORDER[i - 1], { refit: true }); }
+        });
+        attachDrag(handle);
+        attachDrag(peek);
+
+        // Automatisch: na een nieuwe route en tijdens het lopen ingeklapt
+        document.addEventListener('hrg:route-shown', () => {
+          if (!state.run) snapTo('collapsed', { refit: true });
+        });
+        document.addEventListener('hrg:route-cleared', () => { if (snap === 'collapsed') fillPeek(); });
+        document.addEventListener('hrg:generate-start', () => { if (snap === 'collapsed') fillPeek(); });
+        document.addEventListener('hrg:run-start', () => snapTo('collapsed'));
+        document.addEventListener('hrg:run-stop', () => snapTo('half', { refit: true }));
+        document.addEventListener('hrg:map-pick', (e) => {
+          if (e.detail.active) {
+            restoreAfterPick = snap;
+            snapTo('collapsed');
+          } else if (restoreAfterPick) {
+            snapTo(restoreAfterPick);
+            restoreAfterPick = null;
+          }
+        });
+
+        // Balk tijdens het lopen meelaten lopen met de navigatie
+        new MutationObserver(() => { if (state.run && snap === 'collapsed') mirrorRun(); })
+          .observe(els.runView, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-state'] });
+        // Melding verschijnt/verdwijnt, of zoeken klaar: ingeklapte hoogte opnieuw
+        new MutationObserver(() => {
+          if (snap !== 'collapsed') return;
+          fillPeek();
+          snapTo('collapsed', { animate: false });
+        }).observe(els.notice, { attributes: true, attributeFilter: ['hidden'] });
+        new MutationObserver(() => { if (snap === 'collapsed' && !state.run) fillPeek(); })
+          .observe(els.btnGenerate, { attributes: true, attributeFilter: ['aria-busy'] });
+
+        // Schermhoogte verandert (Safari-balk in/uit, draaien): huidige stand opnieuw
+        const resnap = () => {
+          if (WIDE.matches) {
+            sheet.style.height = '';
+            sheet.style.maxHeight = '';
+            delete sheet.dataset.snap;
+            setInert('half');
+            return;
+          }
+          if (snap !== 'half' || sheet.dataset.snap !== 'half') snapTo(snap, { animate: false, refit: true });
+        };
+        // Safari schuift de adresbalk in stapjes: eerst laten uitrazen. Niet elke browser vuurt
+        // visualViewport-resize af bij een andere schermhoogte, dus ook naar window luisteren.
+        let resizeTimer = 0;
+        const onResize = () => {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(resnap, 200);
+        };
+        window.addEventListener('resize', onResize);
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+        WIDE.addEventListener('change', () => { resnap(); if (!WIDE.matches) snapTo(snap, { animate: false }); });
+
+        if (!WIDE.matches) {
+          sheet.dataset.snap = 'half';
+          setInert('half');
+        }
+        updateHandle();
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Opstarten

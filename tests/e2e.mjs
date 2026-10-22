@@ -107,7 +107,10 @@ async function generate(page, value) {
   await page.evaluate((a) => document.getElementById(a ? 'btnAgain' : 'btnGenerate').click(), again);
   await page.waitForFunction(() => !document.querySelector('[aria-busy="true"]'), null, { timeout: 240000 });
   await sleep(400);
-  return page.evaluate(() => {
+  // Paneel klapt na een route in (functie 9): weer openen zodat de test bij de bediening kan.
+  const collapsed = await page.evaluate(() => document.getElementById('sheet').dataset.snap === 'collapsed');
+  if (collapsed) await openPanel(page);
+  return page.evaluate((wasCollapsed) => {
     const hist = JSON.parse(localStorage.getItem('hrg.history.v1') || '[]');
     const n = document.getElementById('notice');
     const txt = (id) => (document.getElementById(id) ? document.getElementById(id).innerText.replace(/\s+/g, ' ').trim() : '');
@@ -117,8 +120,17 @@ async function generate(page, value) {
       meta: txt('resultMeta'),
       info: txt('resultInfo'),
       checks: txt('resultChecks'),
+      collapsed: wasCollapsed,
     };
-  });
+  }, collapsed);
+}
+
+// Paneel naar "half" (zoals de gebruiker op het greepje tikt) als het ingeklapt is.
+async function openPanel(page) {
+  const snap = await page.evaluate(() => document.getElementById('sheet').dataset.snap);
+  if (snap !== 'collapsed') return;
+  await page.click('.sheet__handle');
+  await page.waitForFunction(() => document.getElementById('sheet').dataset.snap === 'half' && !document.getElementById('sheet').classList.contains('is-snapping'));
 }
 
 // Wachten tot de kaarttegels langs de route opgeslagen zijn (herladen tijdens het opslaan breekt
@@ -128,12 +140,14 @@ async function waitTiles(page) {
 }
 
 async function setSwitch(page, prefId, on) {
+  await openPanel(page);
   const sel = `[data-pref="${prefId}"] input[role="switch"]`;
   const cur = await page.$eval(sel, (el) => el.checked);
   if (cur !== on) await page.click(sel);
 }
 
 async function choose(page, prefId, value) {
+  await openPanel(page);
   await page.click(`[data-pref="${prefId}"] input[value="${value}"] + span`); // tikken op het zichtbare label
 }
 
@@ -482,6 +496,95 @@ test('functie 8: via een punt naar keuze', async () => {
 // Functie 9: paneel inklappen
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('functie 9: paneel inklappen (iPhone)', async () => {
+  const geom = (page) => page.evaluate(() => {
+    const sheet = document.getElementById('sheet').getBoundingClientRect();
+    const top = document.querySelector('.topbar').getBoundingClientRect().bottom;
+    const route = document.querySelector('.leaflet-overlay-pane path.route-line');
+    const rr = route ? route.getBoundingClientRect() : null;
+    const go = document.querySelector('#peek:not([hidden]) .peek__plan:not([hidden]) .peek__go');
+    const gr = go ? go.getBoundingClientRect() : null;
+    const hit = gr ? document.elementFromPoint(gr.left + gr.width / 2, gr.top + gr.height / 2) : null;
+    return {
+      snap: document.getElementById('sheet').dataset.snap,
+      vh: innerHeight, sheetTop: Math.round(sheet.top), sheetBottom: Math.round(sheet.bottom), sheetH: Math.round(sheet.height), topbar: Math.round(top),
+      route: rr && { top: Math.round(rr.top), bottom: Math.round(rr.bottom), left: Math.round(rr.left), right: Math.round(rr.right), h: Math.round(rr.height), w: Math.round(rr.width) },
+      goText: go ? go.textContent : null, goVisible: !!(gr && gr.bottom <= innerHeight && hit && go.contains(hit)),
+      peekText: (document.getElementById('peek') || {}).innerText || '',
+    };
+  });
+  const settle = (page) => page.waitForFunction(() => !document.getElementById('sheet').classList.contains('is-snapping') && document.getElementById('sheet').dataset.snap !== 'drag');
+  // Volledig zichtbaar (niet achter topbalk of paneel) en niet piepklein. Leaflet zoomt in hele
+  // stappen (factor 2), dus de route vult 50–100% van het deel binnen de marges.
+  const routeFits = (g) => g.route && g.route.top >= g.topbar - 2 && g.route.bottom <= g.sheetTop + 2 && g.route.left >= -2 && g.route.right <= 392
+    && (g.route.h > (g.sheetTop - g.topbar) * 0.35 || g.route.w > 390 * 0.35);
+
+  // iPhone 13; tweede ronde met de Safari-adresbalk onderin (lagere viewport) en daarna weer weg
+  for (const variant of [{ name: 'iPhone 13' }, { name: 'adresbalk onderin', viewport: { width: 390, height: 580 } }]) {
+    console.log(`  · ${variant.name}`);
+    const { context, page, errors } = await openApp({ start: 'alphen', viewport: variant.viewport, scheme: 'dark' });
+    page.on('dialog', (d) => d.accept());
+    await sleep(1000); // paneel schuift bij het openen 0,8 s omhoog
+    let g = await geom(page);
+    check(g.snap === 'half' && g.sheetBottom === g.vh && g.sheetH <= g.vh * 0.75 + 1, `start "half": ${g.sheetH}px van ${g.vh}px, onderkant op ${g.sheetBottom}`);
+    // Tikken: half → volledig → ingeklapt
+    await page.click('.sheet__handle'); await settle(page);
+    g = await geom(page);
+    check(g.snap === 'full' && g.sheetTop <= g.topbar + 12, `tik: volledig (bovenkant ${g.sheetTop}px, topbalk ${g.topbar}px)`);
+    check(await page.evaluate(() => { const p = document.getElementById('prefs'); p.scrollIntoView(); const r = p.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0; }), 'volledig: voorkeuren bereikbaar');
+    await page.click('.sheet__handle'); await settle(page);
+    g = await geom(page);
+    check(g.snap === 'collapsed' && g.sheetH <= 150 && g.sheetBottom === g.vh, `tik: ingeklapt, ${g.sheetH}px hoog (kaart ${Math.round((g.sheetTop / g.vh) * 100)}% van het scherm)`);
+    check(/Afstand\s*5\s*km/i.test(g.peekText) && g.goText === 'Genereer' && g.goVisible, `balk: "${g.peekText.replace(/\s+/g, ' ')}", knop "${g.goText}" volledig zichtbaar en raakbaar`);
+    // Vegen: omhoog naar half/volledig, omlaag naar ingeklapt
+    const h = await page.$eval('.sheet__handle', (e) => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    await page.mouse.move(h.x, h.y); await page.mouse.down();
+    for (let i = 1; i <= 10; i++) { await page.mouse.move(h.x, h.y - i * 25); await sleep(30); }
+    await page.mouse.up(); await settle(page);
+    g = await geom(page);
+    check(g.snap === 'half' || g.snap === 'full', `veeg omhoog (250px): ${g.snap}`);
+    const h2 = await page.$eval('.sheet__handle', (e) => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    await page.mouse.move(h2.x, h2.y); await page.mouse.down();
+    for (let i = 1; i <= 6; i++) { await page.mouse.move(h2.x, h2.y + i * 60); await sleep(10); }
+    await page.mouse.up(); await settle(page);
+    g = await geom(page);
+    check(g.snap === 'collapsed', `snelle veeg omlaag: ${g.snap}`);
+    // Genereren vanuit de balk → route; paneel blijft ingeklapt, route past in het zichtbare deel
+    await page.click('.peek__go');
+    await page.waitForFunction(() => !document.querySelector('[aria-busy="true"]') && document.getElementById('sheet').dataset.snap === 'collapsed' && !document.getElementById('result').hidden, null, { timeout: 120000 });
+    await settle(page); await sleep(500);
+    g = await geom(page);
+    check(g.goText === 'Start' && /\d+,\d+\s*km/.test(g.peekText) && g.goVisible, `na genereren: ingeklapt, balk "${g.peekText.replace(/\s+/g, ' ')}" + "Start"`);
+    check(routeFits(g), `route past in het zichtbare deel: route ${JSON.stringify(g.route)}, zichtbaar ${g.topbar}–${g.sheetTop}px`);
+    // Na genereren vanuit "half" klapt het paneel automatisch in
+    await openPanel(page);
+    const r = await generate(page);
+    check(r.collapsed, 'na "Andere route" (vanuit half): automatisch ingeklapt');
+    await waitTiles(page);
+    // Hardlopen: standaard ingeklapt met afslag + Stop; daarna weer half
+    await page.evaluate(() => document.getElementById('btnStart').click());
+    await page.waitForFunction(() => document.body.classList.contains('is-running'));
+    await settle(page); await sleep(300);
+    g = await geom(page);
+    const runPeek = await page.$eval('.peek__run', (e) => !e.hidden && e.getBoundingClientRect().bottom <= innerHeight);
+    check(g.snap === 'collapsed' && runPeek && /Nog \d/.test(g.peekText), `tijdens lopen: ingeklapt, "${g.peekText.replace(/\s+/g, ' ')}"`);
+    await page.click('.peek__stop');
+    await page.waitForFunction(() => !document.body.classList.contains('is-running'));
+    await settle(page);
+    check((await geom(page)).snap === 'half', 'na stoppen: weer half');
+    if (variant.viewport) {
+      // Adresbalk verdwijnt (viewport groter): ingeklapte stand blijft onderaan, route past nog
+      await page.click('.sheet__handle'); await settle(page); await page.click('.sheet__handle'); await settle(page);
+      await page.setViewportSize({ width: 390, height: 664 });
+      await sleep(700); await settle(page);
+      g = await geom(page);
+      check(g.snap === 'collapsed' && g.sheetBottom === 664 && routeFits(g), `adresbalk weg (664px): onderkant ${g.sheetBottom}, route ${JSON.stringify(g.route)} past in ${g.topbar}–${g.sheetTop}px`);
+    }
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // Uitvoeren

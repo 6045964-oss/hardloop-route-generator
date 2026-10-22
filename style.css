@@ -1052,6 +1052,49 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
 
 /* ---------- Functie 9: paneel inklappen ----------
    (eigen blok; los terug te draaien via de bijbehorende commit) */
+.sheet__handle {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  margin: -10px 0 -8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  touch-action: none;
+  cursor: grab;
+}
+.sheet__handle .sheet__grip { width: 52px; height: 6px; transition: width .2s var(--ease-out), background-color .2s; }
+.sheet__handle:active .sheet__grip { width: 64px; background: var(--muted); }
+.sheet__handle:focus-visible { outline: none; }
+.sheet__handle:focus-visible .sheet__grip { outline: 3px solid var(--focus); outline-offset: 4px; }
+.sheet.is-snapping { transition: height .32s var(--ease-out); }
+.sheet[data-snap="drag"] { user-select: none; }
+.sheet[data-snap="collapsed"] > .plan,
+.sheet[data-snap="collapsed"] > .run { display: none; }
+
+.peek { touch-action: none; animation: rise .3s var(--ease-out) both; }
+.peek[hidden], .peek [hidden] { display: none; }
+.peek__plan, .peek__run { display: flex; align-items: center; gap: 12px; }
+.peek__text { flex: 1; min-width: 0; margin: 0; display: grid; line-height: 1.05; }
+.peek__label { font-size: 13px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.peek__value { font-family: var(--font-display); font-weight: 800; font-size: 36px; }
+.peek__value small { margin-left: 4px; font-size: 20px; color: var(--muted); }
+.peek .btn { width: auto; min-height: 56px; padding: 0 22px; font-size: 22px; }
+.peek__dist { font-family: var(--font-display); font-weight: 800; font-size: 30px; }
+.peek__what { font-weight: 700; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek__left { font-size: 14px; color: var(--muted); font-weight: 600; }
+.peek__run[data-state="off"] .peek__what { color: var(--alert); }
+
+/* Tijdens het lopen blijft het greepje: het paneel is dan standaard ingeklapt */
+@media (max-width: 767px) {
+  body.is-running .sheet__handle { display: flex; }
+  body.is-running .sheet__handle .sheet__grip { display: block; }
+}
+@media (min-width: 768px) {
+  .sheet__handle, .peek { display: none !important; }
+}
 
 /* ---------- Live-modus: kaart krijgt voorrang ---------- */
 body.is-running .topbar__actions { visibility: hidden; pointer-events: none; }
