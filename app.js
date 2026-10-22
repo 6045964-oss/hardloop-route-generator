@@ -2203,6 +2203,50 @@
   // Voorkeur 3: drukke hoofdwegen vermijden
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // ORS' "quiet"-weging geeft bij round trips in Nederland exact dezelfde route (getest), dus
+  // achteraf scoren met extra_info: waytype 1 = hoofdweg (telt dubbel), 2 = "Road"
+  // (secundaire/tertiaire/ongeclassificeerde weg); waycategory-bit 1 = snelweg.
+  // Onder elke route staat hoeveel meter langs zo'n weg loopt, ook als de voorkeur uit staat.
+  {
+    const QUIET_OK_SHARE = 0.05;  // tot 5% van de route langs drukke wegen: voorkeur gehaald
+    const QUIET_BAD_SHARE = 0.25; // vanaf 25% (gewogen): slechtst mogelijke score
+    const QUIET_WEIGHT = 8;
+
+    registerFeature({
+      id: 'quiet',
+      defaults: { quiet: false },
+      ui() {
+        prefSwitch(prefRow('quiet', 'Drukke wegen vermijden', 'Liever rustige straten en paden dan langs doorgaande wegen.'), 'quiet');
+      },
+      active: () => prefs.quiet,
+      label: () => 'rustige wegen',
+      request(body) { body.extra_info.push('waytype', 'waycategory'); },
+      analyze(cand) {
+        const way = extraMeters(cand, 'waytype');
+        if (!way) return;
+        const cat = extraMeters(cand, 'waycategory') || {};
+        const highway = Object.entries(cat).reduce((sum, [v, m]) => sum + (Number(v) & 1 ? m : 0), 0);
+        const main = Math.max(way[1] || 0, highway);
+        cand.stats.busyM = Math.round(main + (way[2] || 0));
+        cand.stats.busyWeighted = shareOf(main * 2 + (way[2] || 0), cand);
+      },
+      soft(cand) {
+        const m = cand.stats.busyM;
+        if (m === undefined) return { ok: true, score: 0, weight: 0, text: 'drukke wegen: onbekend' };
+        return {
+          ok: shareOf(m, cand) <= QUIET_OK_SHARE,
+          score: clamp(cand.stats.busyWeighted / QUIET_BAD_SHARE, 0, 1),
+          weight: QUIET_WEIGHT,
+          text: `rustige wegen: ${m} m langs drukke weg`,
+        };
+      },
+      info(stats) {
+        if (stats.busyM === undefined) return '';
+        return stats.busyM < 20 ? 'Niet langs drukke wegen' : `${new Intl.NumberFormat('nl-NL').format(Math.round(stats.busyM / 10) * 10)} m langs drukke wegen`;
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Voorkeur 4: ondergrond

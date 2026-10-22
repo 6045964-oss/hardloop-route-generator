@@ -263,6 +263,27 @@ test('voorkeur 2: weinig bochten', async () => {
 // Voorkeur 3: drukke hoofdwegen vermijden
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 3: drukke hoofdwegen vermijden', async () => {
+  const { context, page, calls, errors } = await openApp();
+  let r = await generate(page, 5);
+  check(/drukke wegen/i.test(r.info), `zonder voorkeur toch getoond: "${r.info}"`);
+  await setSwitch(page, 'quiet', true);
+  const before = calls.length;
+  r = await generate(page);
+  check(/rustige wegen: \d+ m langs drukke weg/.test(r.checks), `onder de route: "${r.checks}"`);
+  check(/drukke wegen/i.test(r.info), `regel onder de route: "${r.info}"`);
+  if (!REAL) {
+    const own = calls.slice(before);
+    const within = own.filter((c) => Math.abs(c.distance - 5000) <= 250);
+    const chosen = own.find((c) => Math.abs(c.distance - r.entry.distance) < 0.01);
+    const least = Math.min(...within.map((c) => c.stats.busy));
+    check(chosen && chosen.stats.busy <= least + 0.03, `gekozen: ${pct(chosen.stats.busy)} drukke weg; rustigste kandidaat binnen 5%: ${pct(least)} (${own.length} verzoeken)`);
+    check(own[0].body.extra_info.includes('waycategory'), 'waycategory in hetzelfde verzoek');
+  }
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Voorkeur 4: ondergrond
