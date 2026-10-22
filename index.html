@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Hardloop Route Generator</title>
+  <meta name="description" content="Genereer rondlopende hardlooproutes vanaf je locatie, met gesproken waarschuwing als je van de route afwijkt.">
+  <meta name="theme-color" content="#14161A">
+  <meta name="color-scheme" content="light dark">
+
+  <!-- iPhone / PWA -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Hardlooproute">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+  <!-- Fonts & kaart -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="style.css">
+
+  <script src="config.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#sheet">Naar de bediening</a>
+
+  <header class="topbar">
+    <h1 class="brand">
+      <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M6 17c0-6 4.5-10 10.5-10S27 10.5 26 16.5 20 26 14.5 25.5 6 22 6 17Z" fill="none" stroke="var(--orange)" stroke-width="3.2" stroke-linecap="round"/>
+        <circle cx="25.8" cy="16.6" r="3.6" fill="var(--lime)"/>
+      </svg>
+      <span class="brand__text">Hardloop <span>Route Generator</span></span>
+    </h1>
+    <nav class="topbar__actions" aria-label="Menu">
+      <button type="button" class="icon-btn" id="btnHistory" aria-label="Opgeslagen routes" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4M12 7v5l3.5 2" /></svg>
+      </button>
+      <button type="button" class="icon-btn" id="btnTheme" aria-label="Weergave: automatisch">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17Z" class="fill"/></svg>
+      </button>
+      <button type="button" class="icon-btn" id="btnKey" aria-label="API-sleutel instellen" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8 20 3M16.5 6.5l2.5 2.5M14 9l2 2"/></svg>
+      </button>
+    </nav>
+  </header>
+
+  <main class="stage">
+    <div id="map" class="map" role="region" aria-label="Kaart. Tik op de kaart om een startpunt te kiezen."></div>
+
+    <section class="sheet" id="sheet" tabindex="-1" aria-label="Route en hardlopen">
+      <button type="button" class="fab" id="btnLocate" aria-label="Centreer op mijn locatie">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7.5"/></svg>
+        <span class="fab__label" id="fabLabel">Volg mij</span>
+      </button>
+
+      <div class="sheet__grip" aria-hidden="true"></div>
+
+      <div class="notice" id="notice" hidden>
+        <div class="notice__body" aria-live="assertive" aria-atomic="true">
+          <p class="notice__title" id="noticeTitle"></p>
+          <p class="notice__text" id="noticeText"></p>
+        </div>
+        <div class="notice__actions">
+          <button type="button" class="notice__action" id="noticeAction" hidden></button>
+          <button type="button" class="notice__close" id="noticeClose" aria-label="Melding sluiten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- PLANNEN -->
+      <div class="plan" id="planView">
+        <h2 class="visually-hidden">Route plannen</h2>
+
+        <div class="start-row">
+          <span class="start-row__dot" aria-hidden="true"></span>
+          <p class="start-row__text">
+            <span class="eyebrow">Startpunt · tik op kaart om te wijzigen</span>
+            <strong id="startLabel">Locatie zoeken…</strong>
+          </p>
+          <button type="button" class="link-btn" id="btnUseGps" hidden>Mijn locatie</button>
+        </div>
+
+        <div class="distance">
+          <label for="distanceInput" class="eyebrow">Afstand</label>
+          <div class="stepper">
+            <button type="button" class="stepper__btn" id="btnMinus" aria-label="Halve kilometer minder">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+            </button>
+            <div class="stepper__field">
+              <input id="distanceInput" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="go"
+                     value="5" aria-describedby="distanceHint">
+              <span class="stepper__unit" aria-hidden="true">km</span>
+            </div>
+            <button type="button" class="stepper__btn" id="btnPlus" aria-label="Halve kilometer meer">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>
+            </button>
+          </div>
+          <div class="chips" role="group" aria-label="Snelkeuze afstand">
+            <button type="button" class="chip" data-km="3">3 km</button>
+            <button type="button" class="chip" data-km="5">5 km</button>
+            <button type="button" class="chip" data-km="8">8 km</button>
+            <button type="button" class="chip" data-km="10">10 km</button>
+            <button type="button" class="chip" data-km="15">15 km</button>
+          </div>
+          <p class="hint-text" id="distanceHint">Kies een afstand tussen 1 en 42 km.</p>
+        </div>
+
+        <button type="button" class="btn btn--primary" id="btnGenerate">
+          <span class="btn__spinner" aria-hidden="true"></span>
+          <span class="btn__label">Genereer route</span>
+        </button>
+
+        <div class="result" id="result" hidden>
+          <h2 class="eyebrow">Werkelijke afstand</h2>
+          <p class="result__value"><span id="resultKm">0,00</span><span class="result__unit">km</span></p>
+          <p class="result__meta" id="resultMeta"></p>
+          <p class="result__tiles" id="tileStatus" aria-live="polite">
+            <span class="tiles-bar" aria-hidden="true"><span id="tileBar"></span></span>
+            <span id="tileText">Kaart offline opslaan…</span>
+          </p>
+          <div class="btn-row">
+            <button type="button" class="btn btn--ghost" id="btnAgain">
+              <span class="btn__spinner" aria-hidden="true"></span>
+              <span class="btn__label">Andere route</span>
+            </button>
+            <button type="button" class="btn btn--go" id="btnStart">Start hardlopen</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIVE -->
+      <div class="run" id="runView" hidden>
+        <h2 class="visually-hidden">Live hardlopen</h2>
+        <div class="nav">
+          <span class="nav__icon" id="navIcon" data-kind="turn" aria-hidden="true">
+            <svg class="nav__svg nav__svg--turn" viewBox="0 0 24 24"><path d="M12 21V5M5.5 11.5 12 5l6.5 6.5"/></svg>
+            <svg class="nav__svg nav__svg--round" viewBox="0 0 24 24"><path d="M12 19.5V23M6.2 15.5A7 7 0 1 1 17.8 15.5"/><path d="M3.8 13.2 6.2 15.6 8.9 13.6"/><text id="navExit" x="12" y="15.6" text-anchor="middle">2</text></svg>
+            <svg class="nav__svg nav__svg--finish" viewBox="0 0 24 24"><path d="M5 22V3M5 4h13l-3 4.5 3 4.5H5"/></svg>
+          </span>
+          <p class="nav__text">
+            <span class="nav__dist" id="navDist"></span>
+            <span class="nav__what" id="navWhat">Volg de oranje lijn</span>
+          </p>
+        </div>
+        <div class="run__status" id="runStatus" data-state="wait" role="status" aria-live="polite">
+          <span class="run__dot" aria-hidden="true"></span>
+          <span id="runStatusText">Wachten op GPS…</span>
+        </div>
+        <dl class="stats">
+          <div class="stat"><dt>Tijd</dt><dd id="statTime">00:00</dd></div>
+          <div class="stat"><dt>Gelopen</dt><dd><span id="statDone">0,00</span><small>km</small></dd></div>
+          <div class="stat"><dt>Te gaan</dt><dd><span id="statLeft">0,0</span><small>km</small></dd></div>
+          <div class="stat stat--dev"><dt>Afwijking</dt><dd><span id="statDev">–</span><small>m</small></dd></div>
+        </dl>
+        <p class="run__warn" id="wakeWarn" hidden></p>
+        <p class="run__warn" id="speechWarn" hidden></p>
+        <p class="run__tip">Zet het geluid aan en de stille modus uit, anders hoor je niets.</p>
+        <button type="button" class="btn btn--stop" id="btnStop">Stop</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- GESCHIEDENIS -->
+  <dialog class="dialog" id="historyDialog" aria-labelledby="historyTitle">
+    <div class="dialog__head">
+      <h2 id="historyTitle">Mijn rondjes</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Sluiten">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <p class="history__summary" id="historySummary"></p>
+    <ol class="history" id="historyList"></ol>
+    <p class="history__empty" id="historyEmpty" hidden>Nog geen routes. Genereer je eerste rondje!</p>
+  </dialog>
+
+  <!-- API-SLEUTEL -->
+  <dialog class="dialog" id="keyDialog" aria-labelledby="keyTitle">
+    <form method="dialog" id="keyForm">
+      <div class="dialog__head">
+        <h2 id="keyTitle">OpenRouteService-sleutel</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Sluiten">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <p>Voor het maken van routes heb je een gratis sleutel nodig:</p>
+      <ol class="steps">
+        <li>Maak een account op <a href="https://openrouteservice.org/dev/#/signup" target="_blank" rel="noopener">openrouteservice.org</a> en bevestig je e-mail.</li>
+        <li>Log in, open je <strong>Dashboard</strong> en maak een token aan van het type <strong>Standard</strong>.</li>
+        <li>Kopieer de sleutel en plak hem hieronder.</li>
+      </ol>
+      <label class="eyebrow" for="keyInput">API-sleutel</label>
+      <input class="text-input" id="keyInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Plak hier je sleutel">
+      <p class="hint-text">De sleutel wordt alleen op dit apparaat bewaard.</p>
+      <div class="btn-row">
+        <button type="button" class="btn btn--ghost" id="btnKeyClear">Wissen</button>
+        <button type="submit" class="btn btn--primary" id="btnKeySave" value="save">Opslaan</button>
+      </div>
+    </form>
+  </dialog>
+
+  <noscript><p class="noscript">Deze app heeft JavaScript nodig.</p></noscript>
+</body>
+</html>
