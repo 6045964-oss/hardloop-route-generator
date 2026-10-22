@@ -1328,6 +1328,14 @@
   const speech = {
     supported: 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window,
     voice: null,
+    // Standaard aan op iPhone/iPad (hardlopen); uit op de laptop zodat testen stil blijft.
+    // Tijdelijk afwijken kan met ?spraak=aan of ?spraak=uit achter de URL.
+    enabled: (() => {
+      const q = new URLSearchParams(location.search).get('spraak');
+      if (q === 'aan') return true;
+      if (q === 'uit') return false;
+      return /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+    })(),
     init() {
       if (!this.supported) return;
       const pick = () => {
@@ -1339,7 +1347,7 @@
     },
     active: new Set(), // referenties vasthouden: anders ruimt de browser uitingen soms te vroeg op
     say(text, { interrupt = false } = {}) {
-      if (!this.supported) return;
+      if (!this.supported || !this.enabled) return;
       try {
         const u = new SpeechSynthesisUtterance(text);
         u.lang = 'nl-NL';
@@ -1523,8 +1531,8 @@
 
     // Spraak moet op iPhone binnen een tik "ontgrendeld" worden: meteen iets zeggen.
     speech.say(`Gestart. Rondje van ${nf1.format(state.route.distance / 1000)} kilometer.`, { interrupt: true });
-    els.speechWarn.hidden = speech.supported;
-    if (!speech.supported) {
+    els.speechWarn.hidden = speech.supported || !speech.enabled;
+    if (!speech.supported && speech.enabled) {
       els.speechWarn.textContent = 'Gesproken waarschuwingen werken niet in deze browser. Let op het scherm: het wordt oranje als je afwijkt.';
     }
 

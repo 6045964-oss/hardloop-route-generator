@@ -5,7 +5,7 @@
  *
  * Verhoog VERSION na elke wijziging aan de app-bestanden, dan haalt de iPhone de nieuwe versie op.
  */
-const VERSION = 'v1.2.2';
+const VERSION = 'v1.2.3';
 const STATIC_CACHE = `hrg-static-${VERSION}`;
 const RUNTIME_CACHE = 'hrg-runtime-v1';
 const TILE_CACHE = 'hrg-tiles-v1';
