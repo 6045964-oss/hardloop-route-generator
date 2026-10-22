@@ -289,6 +289,31 @@ test('voorkeur 3: drukke hoofdwegen vermijden', async () => {
 // Voorkeur 4: ondergrond
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 4: ondergrond', async () => {
+  const { context, page, calls, errors } = await openApp({ start: 'alphen' });
+  for (const want of ['paved', 'unpaved']) {
+    await choose(page, 'surface', want);
+    const before = calls.length;
+    const r = await generate(page, 5);
+    check(/Verhard \d+% · onverhard \d+%/.test(r.info), `${want}: onder de route "${r.info}"`);
+    check(new RegExp(`${want === 'paved' ? '(?<!on)verhard' : 'onverhard'}: \\d+%`).test(r.checks), `${want}: voorkeur "${r.checks}"`);
+    if (!REAL) {
+      const own = calls.slice(before);
+      const key = want === 'paved' ? 'paved' : 'unpaved';
+      const within = own.filter((c) => Math.abs(c.distance - 5000) <= 250);
+      const chosen = own.find((c) => Math.abs(c.distance - r.entry.distance) < 0.01);
+      const bestShare = Math.max(...within.map((c) => c.stats[key]));
+      check(chosen && chosen.stats[key] >= bestShare - 0.05, `${want}: gekozen ${pct(chosen.stats[key])}, beste kandidaat binnen 5% ${pct(bestShare)} (${own.length} verzoeken)`);
+    }
+  }
+  await waitTiles(page);
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  check(await page.$eval('[data-pref="surface"] input[value="unpaved"]', (e) => e.checked), 'keuze "onverhard" onthouden na herladen');
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Voorkeur 5: hoogteverschil

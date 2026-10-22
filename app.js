@@ -2252,6 +2252,83 @@
   // Voorkeur 4: ondergrond
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Ondergrond uit extra_info surface. In Nederland is van een groot deel van de wegen de
+  // ondergrond onbekend (0); die stukken leiden we af uit het wegtype: straten, wegen,
+  // fietspaden en voetpaden (stoepen) zijn hier vrijwel altijd verhard, landwegen (track)
+  // meestal niet. Gewone paden (path) blijven "onbekend".
+  {
+    const PAVED = new Set([1, 3, 4, 5, 6, 7, 14, 18]);
+    const UNPAVED = new Set([2, 8, 9, 10, 11, 12, 15, 16, 17]);
+    const WAY_PAVED = new Set([1, 2, 3, 6, 7]);
+    const WAY_UNPAVED = new Set([5]);
+    const SURFACE_OK = { paved: 0.75, unpaved: 0.5 }; // aandeel waarbij de voorkeur gehaald is
+    const SURFACE_WEIGHT = 4;
+
+    // Waarde per lijnstuk (tussen punt i en i+1) uit [van, tot, waarde]-reeksen.
+    function perEdge(values, n) {
+      const out = new Int16Array(Math.max(0, n - 1)).fill(-1);
+      (values || []).forEach(([from, to, v]) => { for (let i = from; i < to && i < out.length; i++) out[i] = v; });
+      return out;
+    }
+
+    registerFeature({
+      id: 'surface',
+      defaults: { surface: 'any' },
+      ui() {
+        const row = prefRow('surface', 'Ondergrond');
+        prefChoice(row, 'surface', [
+          { value: 'any', text: 'Maakt niet uit' },
+          { value: 'paved', text: 'Verhard' },
+          { value: 'unpaved', text: 'Onverhard' },
+        ]);
+      },
+      active: () => prefs.surface === 'paved' || prefs.surface === 'unpaved',
+      label: () => (prefs.surface === 'paved' ? 'verhard' : 'onverhard'),
+      request(body) { body.extra_info.push('surface', 'waytype'); },
+      analyze(cand) {
+        if (!cand.extras.surface) return;
+        const n = cand.coords.length;
+        const surf = perEdge(cand.extras.surface, n);
+        const way = perEdge(cand.extras.waytype, n);
+        const cum = cand.cumM || (cand.cumM = cumulativeMeters(cand.coords));
+        let paved = 0; let unpaved = 0; let unknown = 0; let guessed = 0;
+        for (let i = 0; i < n - 1; i++) {
+          const m = cum[i + 1] - cum[i];
+          if (PAVED.has(surf[i])) paved += m;
+          else if (UNPAVED.has(surf[i])) unpaved += m;
+          else if (WAY_PAVED.has(way[i])) { paved += m; guessed += m; }
+          else if (WAY_UNPAVED.has(way[i])) { unpaved += m; guessed += m; }
+          else unknown += m;
+        }
+        const total = paved + unpaved + unknown || 1;
+        cand.stats.paved = paved / total;
+        cand.stats.unpaved = unpaved / total;
+        cand.stats.surfaceUnknown = unknown / total;
+        cand.stats.surfaceGuessed = guessed / total;
+      },
+      soft(cand) {
+        const st = cand.stats;
+        if (st.paved === undefined) return { ok: true, score: 0, weight: 0, text: 'ondergrond: onbekend' };
+        const want = prefs.surface;
+        const match = want === 'paved' ? st.paved : st.unpaved;
+        const other = want === 'paved' ? st.unpaved : st.paved;
+        return {
+          ok: match >= SURFACE_OK[want],
+          score: clamp(other + st.surfaceUnknown * 0.5, 0, 1),
+          weight: SURFACE_WEIGHT,
+          text: `${want === 'paved' ? 'verhard' : 'onverhard'}: ${pct(match)}`,
+        };
+      },
+      info(stats) {
+        if (stats.paved === undefined) return '';
+        let t = `Verhard ${pct(stats.paved)} · onverhard ${pct(stats.unpaved)}`;
+        if (stats.surfaceUnknown >= 0.05) t += ` · onbekend ${pct(stats.surfaceUnknown)}`;
+        if (stats.surfaceGuessed >= 0.2) t += ' (deels geschat uit het wegtype)';
+        return t;
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Voorkeur 5: hoogteverschil
