@@ -216,6 +216,28 @@ test('basis: voorkeuren-paneel, max. 8 verzoeken, minuutlimiet', async () => {
 // Voorkeur 1: platteland
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 1: platteland', async () => {
+  const { context, page, calls, errors } = await openApp();
+  await setSwitch(page, 'rural', true);
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  check(await page.$eval('[data-pref="rural"] input[role="switch"]', (e) => e.checked), 'keuze onthouden na herladen');
+  check(/platteland/.test(await page.$eval('#prefsSummary', (e) => e.textContent)), 'samenvatting noemt "platteland"');
+  const r = await generate(page, 8);
+  check(/platteland/.test(r.checks), `onder de route: "${r.checks}"`);
+  if (!REAL) {
+    const sent = calls[calls.length - 1].body;
+    check(['waytype', 'surface', 'green'].every((k) => sent.extra_info.includes(k)), `extra_info in hetzelfde verzoek: ${sent.extra_info.join(', ')}`);
+    const within = calls.filter((c) => Math.abs(c.distance - 8000) <= 400);
+    const chosen = calls.find((c) => Math.abs(c.distance - r.entry.distance) < 0.01);
+    // Vanaf 60% telt een route als "helemaal platteland": daarboven beslist de afstand.
+    const bestRural = Math.min(0.6, Math.max(...within.map((c) => c.stats.rural)));
+    check(chosen && chosen.stats.rural >= bestRural - 0.02, `gekozen: ${pct(chosen.stats.rural)} paden/onverhard; beste kandidaat binnen 5%: ${pct(Math.max(...within.map((c) => c.stats.rural)))} (${calls.length} verzoeken)`);
+  }
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Voorkeur 2: weinig bochten

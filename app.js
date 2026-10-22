@@ -2114,6 +2114,49 @@
   // Voorkeur 1: platteland
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // ORS' eigen "green"-weging doet niets bij round trips in Nederland (getest: zelfde route),
+  // en de green-index heeft hier geen data (overal 10). Daarom achteraf scoren: aandeel paden
+  // en landwegen (waytype 4/5) of onverhard; waar ORS wél groendata heeft (wisselende
+  // green-waarden, o.a. Duitsland) telt de green-index.
+  {
+    const RURAL_GOOD = 0.6;   // vanaf dit aandeel telt de route als "helemaal platteland"
+    const RURAL_OK = 0.3;     // vanaf dit aandeel: voorkeur gehaald
+    const RURAL_WEIGHT = 2;
+    const UNPAVED = new Set([2, 8, 9, 10, 11, 12, 15, 16, 17]);
+
+    registerFeature({
+      id: 'rural',
+      defaults: { rural: false },
+      ui() {
+        prefSwitch(prefRow('rural', 'Platteland', 'Liever paden, landwegen en buitengebied dan straten.'), 'rural');
+      },
+      active: () => prefs.rural,
+      label: () => 'platteland',
+      request(body) { body.extra_info.push('waytype', 'surface', 'green'); },
+      analyze(cand) {
+        const green = cand.extras.green;
+        if (green && new Set(green.map((v) => v[2])).size > 1) {
+          const m = extraMeters(cand, 'green');
+          const avg = Object.entries(m).reduce((sum, [v, meters]) => sum + Number(v) * meters, 0) / cand.distance;
+          cand.stats.rural = clamp(avg / 10, 0, 1);
+          cand.stats.ruralBy = 'green';
+          return;
+        }
+        const way = extraMeters(cand, 'waytype') || {};
+        const surf = extraMeters(cand, 'surface') || {};
+        const paths = (way[4] || 0) + (way[5] || 0);
+        const unpaved = Object.entries(surf).reduce((sum, [v, m]) => sum + (UNPAVED.has(Number(v)) ? m : 0), 0);
+        cand.stats.rural = clamp(shareOf(Math.max(paths, unpaved), cand), 0, 1);
+        cand.stats.ruralBy = 'paden';
+      },
+      soft(cand) {
+        const r = cand.stats.rural || 0;
+        const what = cand.stats.ruralBy === 'green' ? 'groen' : 'paden en landwegen';
+        return { ok: r >= RURAL_OK, score: 1 - Math.min(1, r / RURAL_GOOD), weight: RURAL_WEIGHT, text: `platteland: ${pct(r)} ${what}` };
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Voorkeur 2: weinig bochten
