@@ -2334,6 +2334,59 @@
   // Voorkeur 5: hoogteverschil
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Hoogte (elevation) in hetzelfde verzoek: ORS geeft dan ascent/descent. Onder elke route
+  // staat het stijgen en dalen; met een maximum is dat een harde eis (prioriteit 3).
+  {
+    const CLIMB_STEP = 10;
+    const CLIMB_MIN = 10;
+    const CLIMB_MAX = 2000;
+
+    registerFeature({
+      id: 'climb',
+      defaults: { maxClimbOn: false, maxClimb: 50 },
+      ui() {
+        const row = prefRow('climb', 'Max. stijgen', 'Alleen rondjes met niet meer hoogtemeters omhoog dan dit.');
+        const box = document.createElement('div');
+        box.className = 'pref__extra mini-stepper';
+        box.innerHTML = `
+          <button type="button" class="mini-stepper__btn" data-dir="-1" aria-label="${CLIMB_STEP} meter minder">−</button>
+          <label class="mini-stepper__field"><span class="visually-hidden">Maximaal stijgen in meters</span>
+            <input type="text" inputmode="numeric" id="maxClimbInput" autocomplete="off"></label>
+          <span class="mini-stepper__unit" aria-hidden="true">m</span>
+          <button type="button" class="mini-stepper__btn" data-dir="1" aria-label="${CLIMB_STEP} meter meer">+</button>`;
+        const input = box.querySelector('input');
+        const show = () => { input.value = String(prefs.maxClimb); box.hidden = !prefs.maxClimbOn; };
+        const save = (v) => {
+          const n = clamp(Math.round((Number(v) || CLIMB_MIN) / CLIMB_STEP) * CLIMB_STEP, CLIMB_MIN, CLIMB_MAX);
+          setPref('maxClimb', n);
+          show();
+        };
+        prefSwitch(row, 'maxClimbOn', show);
+        row.append(box);
+        box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => save(prefs.maxClimb + Number(b.dataset.dir) * CLIMB_STEP)));
+        input.addEventListener('change', () => save(String(input.value).replace(/[^\d]/g, '')));
+        show();
+      },
+      active: () => prefs.maxClimbOn,
+      label: () => `max. ${prefs.maxClimb} m stijgen`,
+      request(body) { body.elevation = true; },
+      hard(cand) {
+        const up = cand.stats.ascent;
+        if (!Number.isFinite(up)) return { ok: true, text: `max. ${prefs.maxClimb} m stijgen: onbekend` };
+        const m = Math.round(up);
+        return {
+          ok: m <= prefs.maxClimb,
+          text: `max. ${prefs.maxClimb} m stijgen: ${m} m`,
+          failText: `Dit rondje heeft ${m} m stijgen, meer dan je maximum van ${prefs.maxClimb} m. Een vlakker rondje binnen de afstand was er niet.`,
+        };
+      },
+      info(stats) {
+        if (!Number.isFinite(stats.ascent)) return '';
+        return `Stijgen ${Math.round(stats.ascent)} m · dalen ${Math.round(stats.descent || 0)} m`;
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Voorkeur 6: richting kiezen

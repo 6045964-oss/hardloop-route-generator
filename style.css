@@ -961,6 +961,29 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
 
 /* ---------- Voorkeur 5: hoogteverschil ----------
    (eigen blok; los terug te draaien via de bijbehorende commit) */
+.pref__extra { grid-column: 1 / -1; }
+.pref__extra[hidden] { display: none; }
+.mini-stepper { display: flex; align-items: center; gap: 8px; }
+.mini-stepper__btn {
+  width: 48px; height: 48px;
+  border: 2px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-display); font-weight: 800; font-size: 26px; line-height: 1;
+  transition: transform .12s var(--ease-out);
+}
+.mini-stepper__btn:active { transform: scale(.92); }
+.mini-stepper__field input {
+  width: 5.5ch; height: 48px;
+  border: 2px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
+  font-family: var(--font-display); font-weight: 800; font-size: 24px;
+}
+.mini-stepper__unit { font-family: var(--font-display); font-weight: 700; font-size: 20px; color: var(--muted); }
 
 /* ---------- Voorkeur 6: richting kiezen ----------
    (eigen blok; los terug te draaien via de bijbehorende commit) */

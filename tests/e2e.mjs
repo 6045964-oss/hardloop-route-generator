@@ -319,6 +319,36 @@ test('voorkeur 4: ondergrond', async () => {
 // Voorkeur 5: hoogteverschil
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('voorkeur 5: hoogteverschil', async () => {
+  const { context, page, calls, errors } = await openApp({ start: 'alphen' });
+  let r = await generate(page, 5);
+  check(/Stijgen \d+ m · dalen \d+ m/.test(r.info), `stijgen/dalen onder de route: "${r.info}"`);
+  if (!REAL) check(calls[calls.length - 1].body.elevation === true, 'elevation in hetzelfde verzoek');
+  check(await page.$eval('#maxClimbInput', (e) => e.closest('.pref__extra').hidden), 'maximum standaard uit');
+  await setSwitch(page, 'climb', true);
+  check(await page.$eval('#maxClimbInput', (e) => e.value === '50' && !e.closest('.pref__extra').hidden), 'aan: standaard 50 m, invoer zichtbaar');
+  // Onhaalbaar laag maximum → duidelijke melding met het werkelijke hoogteverschil
+  await page.fill('#maxClimbInput', '10');
+  await page.$eval('#maxClimbInput', (e) => e.dispatchEvent(new Event('change', { bubbles: true })));
+  r = await generate(page);
+  const up = Math.round(r.entry.stats.ascent);
+  if (up > 10) {
+    check(new RegExp(`${up} m stijgen, meer dan je maximum van 10 m`).test(r.notice), `melding: "${r.notice.slice(0, 160)}"`);
+    check(/✗ Niet gehaald: max\. 10 m stijgen/.test(r.checks), `onder de route: "${r.checks}"`);
+  } else {
+    check(/✓ Gehaald: max\. 10 m stijgen/.test(r.checks), `vlak rondje gevonden: "${r.checks}"`);
+  }
+  // Ruim maximum → gehaald
+  await page.click('[data-pref="climb"] .mini-stepper__btn[data-dir="1"]');
+  check(await page.$eval('#maxClimbInput', (e) => e.value) === '20', 'knop + verhoogt met 10 m');
+  await page.fill('#maxClimbInput', '400');
+  await page.$eval('#maxClimbInput', (e) => e.dispatchEvent(new Event('change', { bubbles: true })));
+  r = await generate(page);
+  check(/✓ Gehaald: max\. 400 m stijgen/.test(r.checks), `ruim maximum: "${r.checks}"`);
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Voorkeur 6: richting kiezen
