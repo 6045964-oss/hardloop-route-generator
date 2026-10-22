@@ -298,7 +298,9 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
   position: absolute;
   left: 0; right: 0; bottom: 0;
   z-index: 900;
-  display: grid;
+  /* Flex-kolom: de inhoud (plan/run) krimpt en scrollt binnen de max-hoogte. */
+  display: flex;
+  flex-direction: column;
   gap: 14px;
   max-height: min(74svh, 680px);
   padding: 10px var(--gutter) calc(var(--safe-bottom) + 18px);
@@ -310,7 +312,9 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
   animation: sheet-up .7s .1s var(--ease-out) both;
 }
 .sheet:focus { outline: none; }
+.sheet > * { flex: none; }
 .sheet > .plan, .sheet > .run {
+  flex: 0 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -318,7 +322,7 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
 }
 
 .sheet__grip {
-  justify-self: center;
+  align-self: center;
   width: 44px; height: 5px;
   border-radius: 99px;
   background: var(--line-soft);
