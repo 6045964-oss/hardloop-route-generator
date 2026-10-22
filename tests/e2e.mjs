@@ -68,10 +68,11 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   // Let op: met een actieve service worker omzeilen verzoeken in WebKit de onderschepping
   // van Playwright. Tests mét service worker gebruiken daarom de echte ORS en tegels.
   if (!realOrs) await installFakeOrs(context, calls, fake);
-  await context.route(/tile\.openstreetmap\.org/, (r) => (realOrs ? r.continue() : r.fulfill({ status: 200, contentType: 'image/png', body: TILE_PNG })));
+  await context.route(/tile\.openstreetmap\.org/, (r) => (realOrs ? r.continue()
+    : r.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: TILE_PNG })));
   const page = await context.newPage();
   const errors = [];
-  page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  page.on('pageerror', (e) => { if (!/Context is stopped/.test(e.message)) errors.push(`pageerror: ${e.message}`); });
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console.error: ${m.text()}`); });
   page.on('request', (r) => { if (realOrs && r.url().includes('/directions/') && r.method() === 'POST') { realCalls.push(Date.now()); calls.push({ real: true }); } });
   await page.goto(BASE);
@@ -120,6 +121,12 @@ async function generate(page, value) {
   });
 }
 
+// Wachten tot de kaarttegels langs de route opgeslagen zijn (herladen tijdens het opslaan breekt
+// verzoeken af; WebKit meldt dat als "access control checks").
+async function waitTiles(page) {
+  await page.waitForFunction(() => /klaar|opgeslagen|mislukt|niet ondersteund/i.test(document.getElementById('tileText').textContent), null, { timeout: 90000 });
+}
+
 async function setSwitch(page, prefId, on) {
   const sel = `[data-pref="${prefId}"] input[role="switch"]`;
   const cur = await page.$eval(sel, (el) => el.checked);
@@ -127,10 +134,10 @@ async function setSwitch(page, prefId, on) {
 }
 
 async function choose(page, prefId, value) {
-  await page.click(`[data-pref="${prefId}"] input[value="${value}"]`, { force: true });
+  await page.click(`[data-pref="${prefId}"] input[value="${value}"] + span`); // tikken op het zichtbare label
 }
 
-const pctOf = (entry, m) => (m / entry.distance) * 100;
+const pct = (x) => `${Math.round(x * 100)}%`;
 
 // 1×1 png voor nep-tegels (geen verkeer naar OSM bij nep-tests)
 const TILE_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
@@ -257,7 +264,7 @@ try {
   for (const t of tests) {
     if (ONLY && !t.name.toLowerCase().includes(ONLY)) continue;
     console.log(`\n▸ ${t.name}${REAL ? ' [echte ORS]' : ''}`);
-    try { await t.fn(); } catch (e) { check(false, `afgebroken: ${e.message.split('\n')[0]}`); }
+    try { await t.fn(); } catch (e) { check(false, `afgebroken: ${e.message.split("\n").slice(0, 12).join(" | ")}`); }
   }
 } finally {
   await browser.close();

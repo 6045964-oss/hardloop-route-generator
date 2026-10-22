@@ -114,7 +114,29 @@ export function fakeRoute(body, { scale = 1 } = {}) {
   const geometry = { type: 'LineString', coordinates: elevation ? line.map(([x, y], i) => [x, y, Math.round(climb * Math.sin((i / n) * Math.PI))]) : line };
   const properties = { summary: { distance, duration: distance / 1.4 }, segments: [{ distance, steps }], extras, way_points: [0, n - 1] };
   if (elevation) { properties.ascent = climb; properties.descent = climb; }
-  return { type: 'FeatureCollection', features: [{ type: 'Feature', geometry, properties }] };
+  // Kenmerken van deze kandidaat (aandelen per lengte), zodat tests de keuze kunnen narekenen.
+  const share = (vals, pick) => vals.reduce((a, [f, t, v]) => a + (pick(v) ? t - f : 0), 0) / (n - 1);
+  // Ondergrond zoals de app hem afleidt: onbekend (0) → uit het wegtype (1/2/3/6/7 verhard, 5 onverhard).
+  const edge = (vals) => { const e = new Array(n - 1).fill(-1); vals.forEach(([f, t, v]) => { for (let i = f; i < t; i++) e[i] = v; }); return e; };
+  const sE = edge(extrasAll.surface), wE = edge(extrasAll.waytype);
+  let pv = 0, up = 0;
+  for (let i = 0; i < n - 1; i++) {
+    if ([1, 3, 4, 5, 6, 7, 14, 18].includes(sE[i])) pv++;
+    else if ([2, 8, 9, 10, 11, 12, 15, 16, 17].includes(sE[i])) up++;
+    else if ([1, 2, 3, 6, 7].includes(wE[i])) pv++;
+    else if (wE[i] === 5) up++;
+  }
+  const stats = {
+    busy: share(extrasAll.waytype, (v) => v === 1 || v === 2),
+    paths: share(extrasAll.waytype, (v) => v === 4 || v === 5),
+    // Platteland zoals de app het meet: max(paden/landwegen, expliciet onverhard)
+    rural: Math.max(share(extrasAll.waytype, (v) => v === 4 || v === 5), share(extrasAll.surface, (v) => v === 10 || v === 12)),
+    unpaved: up / (n - 1),
+    paved: pv / (n - 1),
+    turns,
+    climb: elevation ? climb : null,
+  };
+  return { type: 'FeatureCollection', features: [{ type: 'Feature', geometry, properties }], stats };
 }
 
 // Koppelt de nep-ORS aan een Playwright-context. calls: lijst waarin elk verzoek belandt.
@@ -126,7 +148,7 @@ export async function installFakeOrs(context, calls = [], opts = {}) {
     }
     const body = JSON.parse(req.postData());
     const json = fakeRoute(body, opts);
-    calls.push({ body, distance: json.features[0].properties.summary.distance });
+    calls.push({ body, distance: json.features[0].properties.summary.distance, stats: json.stats });
     await route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(json) });
   });
   return calls;
