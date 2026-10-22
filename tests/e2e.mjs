@@ -394,6 +394,32 @@ test('voorkeur 6: richting kiezen', async () => {
 // Functie 7: tijd in plaats van km
 // (eigen blok; los terug te draaien via de bijbehorende commit)
 // ---------------------------------------------------------------------------
+test('functie 7: tijd in plaats van km', async () => {
+  const { context, page, calls, errors } = await openApp();
+  await page.click('.seg--unit input[value="min"] + span');
+  check(await page.$eval('.stepper__unit', (e) => e.textContent) === 'min', 'eenheid "min" in het invoerveld');
+  check(/≈ 5,0 km bij 6:00 min\/km/.test(await page.$eval('#unitKm', (e) => e.textContent)), `standaard 30 min, 6:00 min/km: "${await page.$eval('#unitKm', (e) => e.textContent)}"`);
+  check((await page.$$eval('.chip', (cs) => cs.map((c) => c.textContent))).join(',') === '20 min,30 min,45 min,60 min,90 min', 'snelkeuzes in minuten');
+  await page.click('#btnPlus');
+  check(await page.$eval('#distanceInput', (e) => e.value) === '35', 'stap van 5 minuten');
+  // Tempo 5:00 → 35 min = 7,0 km
+  for (let i = 0; i < 4; i++) await page.click('[data-pref="pace"] .mini-stepper__btn[data-dir="-1"]');
+  check(await page.$eval('#paceInput', (e) => e.value) === '5:00', 'tempo 4× sneller in stappen van 15 s: 5:00');
+  check(/≈ 7,0 km bij 5:00/.test(await page.$eval('#unitKm', (e) => e.textContent)), `35 min bij 5:00: "${await page.$eval('#unitKm', (e) => e.textContent)}"`);
+  const r = await generate(page);
+  check(Math.abs(r.entry.requested - 7000) < 1 && r.entry.requestedMin === 35, `gevraagd: ${r.entry.requestedMin} min = ${r.entry.requested / 1000} km`);
+  check(/Gevraagd 35 min \(7 km\)/.test(r.meta), `onder de route: "${r.meta}"`);
+  check(/Looptijd ≈ \d+ min bij 5:00 min\/km/.test(r.info), `looptijd: "${r.info.match(/Looptijd[^·]*km/)}"`);
+  await waitTiles(page);
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  check(await page.$eval('#distanceInput', (e) => e.value) === '35' && await page.$eval('#paceInput', (e) => e.value) === '5:00', 'minuten en tempo onthouden na herladen');
+  await page.click('.seg--unit input[value="km"] + span');
+  check(await page.$eval('.stepper__unit', (e) => e.textContent) === 'km' && await page.$eval('#unitKm', (e) => e.hidden), 'terug naar km');
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
 
 // ---------------------------------------------------------------------------
 // Functie 8: via een punt naar keuze

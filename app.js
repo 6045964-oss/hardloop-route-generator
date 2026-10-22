@@ -2468,6 +2468,162 @@
   // Functie 7: tijd in plaats van km
   // (eigen blok; los terug te draaien via de bijbehorende commit)
   // ---------------------------------------------------------------------------
+  // Schakelaar km/minuten. In minuten rekent de app de afstand uit met een eigen tempo
+  // (min/km, standaard 6:00). Vervangt alleen de aanhaakpunten (hooks) voor de invoer.
+  {
+    const MIN_STEP = 5;
+    const MIN_MINUTES = 5;
+    const MAX_MINUTES = 300;
+    const MIN_CHIPS = [20, 30, 45, 60, 90];   // evenveel als de km-snelkeuzes
+    const PACE_STEP = 15;                     // seconden per km
+    const PACE_MIN = 180;
+    const PACE_MAX = 900;
+    const fmtPace = (sec) => `${Math.floor(sec / 60)}:${pad(sec % 60)}`;
+    const kmFor = (minutes, pace = prefs.pace) => (minutes * 60) / pace;
+    const base = { ...hooks };                // km-gedrag bewaren
+    const isMin = () => prefs.unit === 'min';
+    let unitKmEl = null;
+    let kmChipText = [];
+
+    function setMinutes(min, { bump = true } = {}) {
+      const v = clamp(Math.round(min), MIN_MINUTES, MAX_MINUTES);
+      setPref('minutes', v);
+      els.distanceInput.value = String(v);
+      els.chips.forEach((c) => c.setAttribute('aria-pressed', String(Number(c.dataset.min) === v)));
+      unitKmEl.textContent = `≈ ${nf1.format(kmFor(v))} km bij ${fmtPace(prefs.pace)} min/km`;
+      if (bump && !reducedMotion) {
+        const field = els.distanceInput.parentElement;
+        field.classList.remove('bump');
+        void field.offsetWidth;
+        field.classList.add('bump');
+      }
+    }
+
+    function applyUnit() {
+      const min = isMin();
+      document.querySelector('.stepper__unit').textContent = min ? 'min' : 'km';
+      document.querySelector('label[for="distanceInput"]').textContent = min ? 'Tijd' : 'Afstand';
+      els.btnMinus.setAttribute('aria-label', min ? `${MIN_STEP} minuten minder` : 'Halve kilometer minder');
+      els.btnPlus.setAttribute('aria-label', min ? `${MIN_STEP} minuten meer` : 'Halve kilometer meer');
+      document.querySelector('.chips').setAttribute('aria-label', min ? 'Snelkeuze tijd' : 'Snelkeuze afstand');
+      els.chips.forEach((c, i) => {
+        if (min) {
+          c.dataset.min = String(MIN_CHIPS[i]);
+          c.textContent = `${MIN_CHIPS[i]} min`;
+        } else {
+          delete c.dataset.min;
+          c.textContent = kmChipText[i];
+        }
+      });
+      unitKmEl.hidden = !min;
+      if (min) setMinutes(prefs.minutes, { bump: false });
+      else setKm(store.get(KEYS.distance, 5), { bump: false });
+    }
+
+    Object.assign(hooks, {
+      readTarget() {
+        if (!isMin()) return base.readTarget();
+        const minutes = parseKm(els.distanceInput.value);
+        const km = kmFor(minutes);
+        if (!Number.isFinite(minutes) || minutes < MIN_MINUTES || minutes > MAX_MINUTES || km < MIN_KM || km > MAX_KM) {
+          showNotice('error', 'Ongeldige tijd',
+            `Kies tussen ${MIN_MINUTES} en ${MAX_MINUTES} minuten, goed voor ${MIN_KM} tot ${MAX_KM} km bij jouw tempo van ${fmtPace(prefs.pace)} min/km.`);
+          els.distanceInput.focus();
+          return null;
+        }
+        return { meters: km * 1000, requestedMin: Math.round(minutes), pace: prefs.pace };
+      },
+      step(dir) {
+        if (!isMin()) return base.step(dir);
+        const cur = parseKm(els.distanceInput.value) || prefs.minutes;
+        setMinutes(dir < 0 ? Math.ceil(cur / MIN_STEP) * MIN_STEP - MIN_STEP : Math.floor(cur / MIN_STEP) * MIN_STEP + MIN_STEP);
+      },
+      chip(chip) {
+        if (!isMin()) return base.chip(chip);
+        setMinutes(Number(chip.dataset.min));
+      },
+      inputChange() {
+        if (!isMin()) return base.inputChange();
+        const v = parseKm(els.distanceInput.value);
+        if (Number.isFinite(v)) setMinutes(v, { bump: false });
+      },
+      requestedText(entry) {
+        if (!entry.requestedMin) return base.requestedText(entry);
+        return `Gevraagd ${entry.requestedMin} min (${nfKm.format(entry.requested / 1000)} km)`;
+      },
+      restoreInput(entry) {
+        if (!isMin()) return base.restoreInput(entry);
+        setMinutes(entry.requestedMin || (entry.requested / 1000) * (prefs.pace / 60), { bump: false });
+      },
+    });
+
+    registerFeature({
+      id: 'time',
+      defaults: { unit: 'km', minutes: 30, pace: 360 },
+      ui() {
+        kmChipText = [...els.chips].map((c) => c.textContent);
+        // km | minuten, naast het label boven de stepper
+        const label = document.querySelector('label[for="distanceInput"]');
+        const head = document.createElement('div');
+        head.className = 'distance__head';
+        label.replaceWith(head);
+        const toggle = document.createElement('div');
+        toggle.className = 'seg seg--unit';
+        toggle.setAttribute('role', 'radiogroup');
+        toggle.setAttribute('aria-label', 'Kies op afstand of op tijd');
+        [['km', 'km'], ['min', 'minuten']].forEach(([value, text]) => {
+          const opt = document.createElement('label');
+          opt.className = 'seg__opt';
+          opt.innerHTML = `<input type="radio" name="unit" value="${value}"><span>${text}</span>`;
+          const input = opt.querySelector('input');
+          input.checked = prefs.unit === value;
+          input.addEventListener('change', () => {
+            if (!input.checked) return;
+            setPref('unit', value);
+            applyUnit();
+          });
+          toggle.append(opt);
+        });
+        head.append(label, toggle);
+        unitKmEl = document.createElement('p');
+        unitKmEl.className = 'unit-km';
+        unitKmEl.id = 'unitKm';
+        unitKmEl.setAttribute('aria-live', 'polite');
+        document.querySelector('.stepper').after(unitKmEl);
+
+        // Tempo in het paneel Voorkeuren
+        const row = prefRow('pace', 'Tempo', 'Om minuten om te rekenen naar kilometers.');
+        const box = document.createElement('div');
+        box.className = 'pref__extra mini-stepper';
+        box.innerHTML = `
+          <button type="button" class="mini-stepper__btn" data-dir="-1" aria-label="${PACE_STEP} seconden per kilometer sneller">−</button>
+          <label class="mini-stepper__field"><span class="visually-hidden">Tempo in minuten per kilometer</span>
+            <input type="text" inputmode="numeric" id="paceInput" autocomplete="off"></label>
+          <span class="mini-stepper__unit" aria-hidden="true">min/km</span>
+          <button type="button" class="mini-stepper__btn" data-dir="1" aria-label="${PACE_STEP} seconden per kilometer langzamer">+</button>`;
+        row.append(box);
+        const paceInput = box.querySelector('input');
+        const savePace = (sec) => {
+          setPref('pace', clamp(Math.round(sec / PACE_STEP) * PACE_STEP, PACE_MIN, PACE_MAX));
+          paceInput.value = fmtPace(prefs.pace);
+          if (isMin()) setMinutes(prefs.minutes, { bump: false });
+        };
+        box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => savePace(prefs.pace + Number(b.dataset.dir) * PACE_STEP)));
+        paceInput.addEventListener('change', () => {
+          const m = String(paceInput.value).match(/^\s*(\d{1,2})(?:[:.,](\d{1,2}))?\s*$/);
+          savePace(m ? Number(m[1]) * 60 + Number(m[2] || 0) : prefs.pace);
+        });
+        paceInput.value = fmtPace(prefs.pace);
+        applyUnit();
+      },
+      info(stats, entry) {
+        if (!entry.requestedMin) return '';
+        const pace = entry.pace || prefs.pace;
+        return `Looptijd ≈ ${Math.round(((entry.distance / 1000) * pace) / 60)} min bij ${fmtPace(pace)} min/km`;
+      },
+    });
+  }
+
 
   // ---------------------------------------------------------------------------
   // Functie 8: via een punt naar keuze
