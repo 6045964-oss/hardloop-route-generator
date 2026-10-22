@@ -51,7 +51,7 @@ window.HRG_CONFIG = {
 HTTPS is nodig voor locatie, het scherm aan houden en installeren als app. GitHub Pages regelt dat automatisch.
 
 ### Een nieuwe versie uitrollen
-Verander je iets aan de bestanden? Verhoog dan in `service-worker.js` het versienummer (`const VERSION = 'v1.2.1'`). Dan haalt de iPhone de nieuwe bestanden op. De app laadt de nieuwe versie daarna vanzelf. Heb je op dat moment al een route op het scherm, dan krijg je een melding met een knop *Laden*.
+Verander je iets aan de bestanden? Verhoog dan in `service-worker.js` het versienummer (`const VERSION = 'v1.2.2'`). Dan haalt de iPhone de nieuwe bestanden op. De app laadt de nieuwe versie daarna vanzelf. Heb je op dat moment al een route op het scherm, dan krijg je een melding met een knop *Laden*.
 
 ---
 

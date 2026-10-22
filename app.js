@@ -29,8 +29,12 @@
   const STEP_KM = 0.5;
   const HISTORY_LIMIT = 60;
 
-  const TOLERANCE_M = 250;          // max. verschil met de gevraagde afstand
+  const TOLERANCE_M = 250;          // max. verschil met de gevraagde afstand (minimaal)…
+  const TOLERANCE_REL = 0.03;       // …en vanaf ~8 km relatief: 3% van de gevraagde afstand
   const MAX_ATTEMPTS = 8;           // max. aantal ORS-aanvragen per "Genereer route"
+  const MAX_ATTEMPTS_LONG = 12;     // vanaf LONG_ROUTE_M: lange rondjes dubbelen vaker, dus meer kansen
+  const LONG_ROUTE_M = 10000;
+  const LENGTH_OBS_LIMIT = 40;      // zoveel recente (lengte, verhouding)-metingen bewaren
   const MAX_SAME_SEED = 3;          // lengte bijstellen met dezelfde vorm, daarna andere vorm
   const OVERLAP_ALLOWED_M = 30;     // dubbel lopen buiten de start/finish-zone
   const START_ZONE_M = 150;         // rond start/finish mag wel een stukje dubbel
@@ -43,7 +47,7 @@
     theme: 'hrg.theme',
     apiKey: 'hrg.orsKey',
     distance: 'hrg.distance',
-    ratio: 'hrg.lengthRatio',
+    lengthObs: 'hrg.lengthObs.v1',
   };
 
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -264,12 +268,61 @@
     worldCopyJump: true,
   }).setView([52.2, 5.3], 7);
 
-  L.tileLayer(TILE_URL, {
+  const tileLayer = L.tileLayer(TILE_URL, {
     maxZoom: 19,
     crossOrigin: true, // CORS-responses: beter te cachen dan opaque responses
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Route: <a href="https://openrouteservice.org">openrouteservice</a>',
   }).addTo(map);
   map.attributionControl.setPrefix(false);
+
+  // Kreeg de kaart bij het opstarten nog geen maat (stylesheet nog niet toegepast, of
+  // het scherm draait), dan meet Leaflet opnieuw zodra de container echt groot is.
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(() => map.invalidateSize()).observe(map.getContainer());
+  }
+
+  // Kaarttegels bewaken: nooit stil een lege kaart. Laden er na het opstarten geen
+  // tegels, of mislukken ze herhaaldelijk zonder dat er één lukt, dan een melding.
+  const tileHealth = { loaded: 0, failedSinceLoad: 0, warned: false };
+  const MAP_NOTICE_TITLE = 'Kaart laadt niet';
+  function retryTiles() {
+    tileHealth.failedSinceLoad = 0;
+    tileHealth.warned = false;
+    map.invalidateSize();
+    tileLayer.redraw();
+    setTimeout(checkTiles, 10000);
+  }
+  function warnTiles() {
+    if (tileHealth.warned) return;
+    tileHealth.warned = true;
+    if (!navigator.onLine) {
+      showNotice('info', MAP_NOTICE_TITLE,
+        'Geen internet, en dit stuk van de kaart is niet offline opgeslagen. Je route en de gesproken aanwijzingen werken gewoon door.',
+        { autoHide: 6000 });
+    } else {
+      showNotice('warn', MAP_NOTICE_TITLE,
+        'De kaarttegels komen niet binnen. Je route en de gesproken aanwijzingen werken gewoon door.',
+        { action: { label: 'Opnieuw', onClick: retryTiles } });
+    }
+  }
+  function checkTiles() {
+    if (map.getContainer().clientHeight < 50) map.invalidateSize();
+    if (tileHealth.loaded === 0 || tileHealth.failedSinceLoad >= 8) warnTiles();
+  }
+  tileLayer.on('tileload', () => {
+    tileHealth.loaded++;
+    tileHealth.failedSinceLoad = 0;
+    if (tileHealth.warned) {
+      tileHealth.warned = false;
+      if (els.noticeTitle.textContent === MAP_NOTICE_TITLE) hideNotice();
+    }
+  });
+  tileLayer.on('tileerror', (e) => {
+    tileHealth.failedSinceLoad++;
+    console.warn('Kaarttegel niet geladen:', e.coords && `${e.coords.z}/${e.coords.x}/${e.coords.y}`);
+    if (tileHealth.failedSinceLoad >= 8) warnTiles();
+  });
+  setTimeout(checkTiles, 12000);
 
   const routeLayer = L.layerGroup().addTo(map);
   const decoLayer = L.layerGroup().addTo(map);
@@ -667,23 +720,86 @@
     return (hit.reduce((n, h) => n + h, 0) * STEP) / 2;
   }
 
+  function lengthTolerance(target) {
+    return Math.max(TOLERANCE_M, target * TOLERANCE_REL);
+  }
+
+  // Hoeveel langer (of korter) dan gevraagd maakt ORS een rondje van ongeveer deze lengte?
+  // ORS wijkt per afstand anders af, dus alleen metingen van vergelijkbare lengte tellen
+  // (gewicht valt weg met de log-verhouding). Gewogen gemiddelde van de metingen rond de
+  // gewogen mediaan: uitschieters (een rare vorm) tellen niet mee, en het springt minder.
+  function predictLengthRatio(meters) {
+    const obs = store.get(KEYS.lengthObs, []);
+    const items = [{ r: 1.05, w: 0.5 }]; // zwakke startwaarde zolang er weinig metingen zijn
+    if (Array.isArray(obs)) {
+      obs.forEach(([m, r], i) => {
+        if (!(m > 0 && r > 0)) return;
+        const d = Math.log(meters / m);
+        const recency = 0.5 + (0.5 * (i + 1)) / obs.length;
+        items.push({ r, w: Math.exp(-(d * d) / (2 * 0.25 * 0.25)) * recency });
+      });
+    }
+    items.sort((a, b) => a.r - b.r);
+    const half = items.reduce((sum, it) => sum + it.w, 0) / 2;
+    let acc = 0;
+    let median = 1.05;
+    for (const it of items) {
+      acc += it.w;
+      if (acc >= half) { median = it.r; break; }
+    }
+    const near = items.filter((it) => Math.abs(it.r / median - 1) <= 0.15);
+    const w = near.reduce((sum, it) => sum + it.w, 0);
+    const mean = w > 0 ? near.reduce((sum, it) => sum + it.r * it.w, 0) / w : median;
+    return clamp(mean, 0.7, 1.6);
+  }
+
+  function rememberLength(distance, asked) {
+    const obs = store.get(KEYS.lengthObs, []);
+    const list = Array.isArray(obs) ? obs : [];
+    list.push([Math.round(distance), Math.round((distance / asked) * 1000) / 1000]);
+    store.set(KEYS.lengthObs, list.slice(-LENGTH_OBS_LIMIT));
+  }
+
   // Vraagt meerdere rondjes aan en past de gevraagde lengte bij tot het rondje
   // binnen de marge valt en niet dubbelt. Geeft anders het beste resultaat terug.
   async function findRoundTrip(start, target, key, onProgress) {
-    let ratio = clamp(Number(store.get(KEYS.ratio, 1.1)) || 1.1, 0.7, 1.6);
+    const maxAttempts = target >= LONG_ROUTE_M ? MAX_ATTEMPTS_LONG : MAX_ATTEMPTS;
+    const tolerance = lengthTolerance(target);
     let seed = newSeed();
-    let sameSeed = 0;
+    let tries = []; // { asked, got } met de huidige seed (zelfde vorm)
     let best = null;
     let lastErr = null;
+    let attemptsMade = 0;
     const better = (a, b) => {
       if (!b) return true;
       if (a.clean !== b.clean) return a.clean;
       return a.dev + a.overlap * 3 < b.dev + b.overlap * 3;
     };
+    // Volgende gevraagde lengte: met twee pogingen van dezelfde vorm de lijn ertussen
+    // doortrekken (secant), met één poging de verhouding daarvan, anders het geleerde model.
+    const nextAsked = () => {
+      const n = tries.length;
+      if (n >= 2) {
+        const p = tries[n - 2];
+        const q = tries[n - 1];
+        const slope = (q.got - p.got) / (q.asked - p.asked);
+        if (Number.isFinite(slope) && slope > 0.4 && slope < 2.5) return q.asked + (target - q.got) / slope;
+      }
+      if (n >= 1) {
+        const q = tries[n - 1];
+        return q.asked * (target / q.got);
+      }
+      return target / predictLengthRatio(target);
+    };
+    const switchSeed = () => {
+      seed = newSeed();
+      tries = [];
+    };
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      onProgress(attempt);
-      const asked = clamp(target / ratio, target * 0.5, target * 1.5);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      onProgress(attempt, maxAttempts);
+      attemptsMade = attempt;
+      const asked = clamp(nextAsked(), target * 0.6, target * 1.4);
       let cand;
       try {
         cand = await requestRoundTrip(start, asked, seed, key);
@@ -693,15 +809,13 @@
           if (best) break;
           throw err;
         }
-        seed = newSeed();
-        sameSeed = 0;
+        switchSeed();
         continue;
       }
 
-      // Leren hoe ORS de lengte "opvat": volgende poging corrigeert daarvoor.
-      const r = cand.distance / asked;
-      ratio = clamp(r, 0.7, 1.6);
-      store.set(KEYS.ratio, clamp(0.7 * (Number(store.get(KEYS.ratio, 1.1)) || 1.1) + 0.3 * r, 0.7, 1.6));
+      // Leren hoe ORS de lengte "opvat", per afstand: volgende routes starten dichterbij.
+      rememberLength(cand.distance, asked);
+      tries.push({ asked, got: cand.distance });
 
       cand.seed = seed;
       cand.dev = Math.abs(cand.distance - target);
@@ -710,18 +824,17 @@
       cand.clean = cand.overlap <= OVERLAP_ALLOWED_M && !cand.uturn;
       cand.attempts = attempt;
       if (better(cand, best)) best = cand;
-      if (cand.clean && cand.dev <= TOLERANCE_M) return { ...cand, ok: true };
+      if (cand.clean && cand.dev <= tolerance) return { ...cand, ok: true };
 
-      if (!cand.clean || ++sameSeed >= MAX_SAME_SEED) {
-        seed = newSeed(); // vorm is het probleem (of convergeert niet): andere richting
-        sameSeed = 0;
+      if (!cand.clean || tries.length >= MAX_SAME_SEED) {
+        switchSeed(); // vorm is het probleem (of convergeert niet): andere richting
       }
     }
     if (!best) {
       throw lastErr || new AppError('Geen route gevonden',
         'Er kon geen rondje gevonden worden vanaf dit startpunt. Probeer een ander startpunt of een andere afstand.', { retry: true });
     }
-    return { ...best, ok: best.clean && best.dev <= TOLERANCE_M };
+    return { ...best, attempts: attemptsMade, ok: best.clean && best.dev <= tolerance };
   }
 
   function setBusy(btn, busy, label) {
@@ -761,8 +874,8 @@
     try {
       const start = state.start.latlng;
       const target = km * 1000;
-      const found = await findRoundTrip(start, target, key, (n) => {
-        btn.querySelector('.btn__label').textContent = n === 1 ? 'Route zoeken…' : `Zoeken… ${n}/${MAX_ATTEMPTS}`;
+      const found = await findRoundTrip(start, target, key, (n, max) => {
+        btn.querySelector('.btn__label').textContent = n === 1 ? 'Route zoeken…' : `Zoeken… ${n}/${max}`;
       });
       const entry = {
         id: `r${Date.now().toString(36)}${found.seed.toString(36)}`,
@@ -782,7 +895,7 @@
 
       if (!found.ok) {
         const parts = [];
-        if (found.dev > TOLERANCE_M) {
+        if (found.dev > lengthTolerance(target)) {
           parts.push(`Dit rondje is ${nf2.format(found.distance / 1000)} km, ${nf2.format(found.dev / 1000)} km ${found.distance > target ? 'langer' : 'korter'} dan gevraagd.`);
         }
         if (!found.clean) {
@@ -938,7 +1051,7 @@
 
     // Resultaat
     const diff = entry.distance - entry.requested;
-    const within = Math.abs(diff) <= TOLERANCE_M;
+    const within = Math.abs(diff) <= lengthTolerance(entry.requested);
     els.resultKm.textContent = nf2.format(entry.distance / 1000);
     const reqTxt = `Gevraagd ${nfKm.format(entry.requested / 1000)} km`;
     const sign = Math.abs(diff) < 5 ? '±' : diff > 0 ? '+' : '−';

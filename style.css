@@ -209,7 +209,9 @@ a { color: inherit; text-underline-offset: 3px; text-decoration-thickness: 2px; 
 .stage { position: fixed; inset: 0; }
 
 .map {
-  position: absolute;
+  /* !important: als app.js in WebKit draait voordat deze stylesheet is toegepast,
+     zet Leaflet inline position: relative en wordt de kaart 0 px hoog. */
+  position: absolute !important;
   inset: 0;
   background: var(--bg);
 }

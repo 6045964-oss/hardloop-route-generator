@@ -5,7 +5,7 @@
  *
  * Verhoog VERSION na elke wijziging aan de app-bestanden, dan haalt de iPhone de nieuwe versie op.
  */
-const VERSION = 'v1.2.1';
+const VERSION = 'v1.2.2';
 const STATIC_CACHE = `hrg-static-${VERSION}`;
 const RUNTIME_CACHE = 'hrg-runtime-v1';
 const TILE_CACHE = 'hrg-tiles-v1';
@@ -132,8 +132,9 @@ async function tileCacheFirst(req) {
     }
     return res;
   } catch {
-    // Offline en niet gecachet: lege, transparante tegel i.p.v. een kapot-plaatje.
-    return new Response(TRANSPARENT_PNG, { status: 200, headers: { 'Content-Type': 'image/png' } });
+    // Offline en niet gecachet: een echte fout (geen stille lege tegel), zodat de app
+    // via Leaflets 'tileerror' kan melden dat de kaart niet laadt.
+    return Response.error();
   }
 }
 
@@ -143,8 +144,3 @@ async function trimCache(cache, max) {
   // Oudste eerst (cache.keys() geeft invoegvolgorde terug)
   await Promise.all(keys.slice(0, keys.length - max).map((k) => cache.delete(k)));
 }
-
-// 1×1 transparante PNG
-const TRANSPARENT_PNG = Uint8Array.from(atob(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
-), (c) => c.charCodeAt(0));

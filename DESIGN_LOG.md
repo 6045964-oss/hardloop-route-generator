@@ -164,3 +164,39 @@ meegenomen in deze versie.
 - `app.js` negeert een `controllerchange` in dezelfde sessie als de allereerste installatie
   (`hadController` wordt bij het opstarten vastgelegd). Bij testen eerst één keer normaal herladen,
   en niet met "cache negeren": een harde verversing omzeilt de service worker.
+
+## Sessie 6 — 2026-10-22: kaart op iPhone, nauwkeuriger lange routes (v1.2.2)
+
+### Lege kaart op iPhone — oorzaak
+- Niet de tegels zelf: in echte WebKit (Playwright, iPhone 13-emulatie) kwamen tegels via de
+  service worker gewoon binnen (200, echte 256×256-beelden). Ook niet het donkere filter: in lichte
+  modus (`filter: none`) was de kaart net zo leeg.
+- Wél een race: de scripts staan op `defer`, en WebKit voerde `app.js` soms uit vóórdat `style.css`
+  was toegepast (vooral als de service worker alles direct uit de cache levert). Leaflet ziet dan
+  `position: static` op `#map`, zet inline `position: relative`, en die inline stijl wint van
+  `.map { position: absolute; inset: 0 }` → kaart 0 px hoog. Desktop-Chrome wacht wel op de
+  stylesheet, daarom werkte het daar.
+
+### Aanpassingen
+| Wijziging | Waarom |
+|---|---|
+| `.map { position: absolute !important }` | Inline stijl van Leaflet kan de kaart nooit meer 0 px maken |
+| `ResizeObserver` → `map.invalidateSize()` | Leaflet meet opnieuw zodra de container echt een maat krijgt |
+| Tegelbewaking (`tileload`/`tileerror`): geen tegel na 12 s of ≥ 8 mislukte op rij → melding "Kaart laadt niet" met *Opnieuw* (offline: korte info) | Nooit meer stil een lege kaart |
+| Service worker geeft bij een mislukte tegel `Response.error()` i.p.v. een transparante PNG | De transparante tegel verborg fouten; nu ziet de app ze |
+| Lengte: tolerantie `max(250 m, 3%)`; correctiemodel per afstand (recente metingen, gewogen naar vergelijkbare lengte, getrimd gemiddelde rond de mediaan); binnen dezelfde vorm secant-bijstelling; 12 pogingen vanaf 10 km | Eén globale verhouding (geleerd bij 5 km) paste niet bij 15–21 km, en ORS is per vorm erg grillig |
+| Melding "Na N pogingen" telt nu alle pogingen | Toonde het nummer van de beste poging |
+
+### Getest
+- WebKit, iPhone 13, donker + licht, 6× laden met actieve service worker: altijd 664 px hoog met
+  echte tegels, ook als de race optrad; ook na route genereren. Tegelserver geblokkeerd → melding,
+  *Opnieuw* herstelt. Bestaande Chrome-test (SW, update-melding, route, tiles) slaagt.
+- Echte ORS, Utrecht centrum en Amersfoort, 5/10/15/21 km: vanaf 10 km max. 3,1% afwijking
+  (eerst 9,3%), max. 20 m dubbel. Simulatie "ORS +25% lang, veel dubbele vormen": oud 3 van 9
+  lange routes > 5%, nieuw 1 van 18.
+
+### Wat kon beter / open
+- Het donkere kaartfilter kon ik niet visueel controleren: headless WebKit tekent geen filters op
+  gecomposite lagen (ook niet in een minimale testpagina). Op de iPhone zelf nakijken.
+- `hadController` in `app.js` negeert updates in dezelfde sessie als de eerste installatie (bekend
+  sinds sessie 5, bewust ongemoeid gelaten).
