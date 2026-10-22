@@ -124,6 +124,8 @@
           <h2 class="eyebrow">Werkelijke afstand</h2>
           <p class="result__value"><span id="resultKm">0,00</span><span class="result__unit">km</span></p>
           <p class="result__meta" id="resultMeta"></p>
+          <ul class="result__info" id="resultInfo" hidden></ul>
+          <ul class="result__checks" id="resultChecks" aria-label="Voorkeuren voor deze route" hidden></ul>
           <p class="result__tiles" id="tileStatus" aria-live="polite">
             <span class="tiles-bar" aria-hidden="true"><span id="tileBar"></span></span>
             <span id="tileText">Kaart offline opslaan…</span>
@@ -136,6 +138,14 @@
             <button type="button" class="btn btn--go" id="btnStart">Start hardlopen</button>
           </div>
         </div>
+
+        <section class="prefs" id="prefs" aria-labelledby="prefsTitle">
+          <div class="prefs__head">
+            <h3 class="eyebrow" id="prefsTitle">Voorkeuren</h3>
+            <p class="prefs__summary" id="prefsSummary"></p>
+          </div>
+          <div class="prefs__list" id="prefsList"></div>
+        </section>
       </div>
 
       <!-- LIVE -->

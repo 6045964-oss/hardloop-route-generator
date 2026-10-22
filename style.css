@@ -867,6 +867,109 @@ body.is-running .route-ants { animation: ants .9s linear infinite; opacity: 1; s
 
 .noscript { position: fixed; inset: auto 16px 16px; padding: 16px; background: var(--alert); color: #fff; border-radius: 12px; z-index: 3000; }
 
+/* ---------- Voorkeuren (paneel) ---------- */
+.prefs {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 2px solid var(--line-soft);
+}
+.prefs__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.prefs__summary { margin: 0; color: var(--muted); font-size: 15px; font-weight: 600; }
+.prefs__list { display: grid; gap: 10px; }
+
+.pref {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  animation: rise .4s var(--ease-out) both;
+}
+.pref__title { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 20px; letter-spacing: .02em; text-transform: uppercase; }
+.pref__hint { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.35; }
+.pref--switch { grid-template-columns: 1fr auto; align-items: center; column-gap: 14px; }
+.pref--switch .pref__hint { grid-column: 1; }
+.pref--switch .switch { grid-column: 2; grid-row: 1 / span 2; }
+
+/* Schakelaar: een echte checkbox met role="switch", groot genoeg voor een duim */
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 64px; height: 38px;
+  margin: 0;
+  border: var(--border) solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: background-color .2s var(--ease-out);
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 4px; left: 4px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--line);
+  transition: transform .25s var(--ease-spring), background-color .2s;
+}
+.switch:checked { background: var(--ink); }
+.switch:checked::after { transform: translateX(26px); background: var(--lime); }
+.switch:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+/* Keuzeknoppen (radiogroep) */
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg__opt { position: relative; flex: 1 1 auto; }
+.seg__opt input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.seg__opt span {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 48px; padding: 0 12px;
+  border: 2px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-family: var(--font-display); font-weight: 700; font-size: 18px;
+  transition: border-color .15s, background-color .15s, transform .12s var(--ease-out);
+}
+.seg__opt input:checked + span { border-color: var(--line); background: var(--ink); color: var(--lime); }
+.seg__opt input:focus-visible + span { outline: 3px solid var(--focus); outline-offset: 2px; }
+.seg__opt:active span { transform: scale(.96); }
+
+/* Onder de route: gegevens en gehaalde voorkeuren */
+.result__info { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; color: var(--muted); font-size: 15px; font-weight: 600; }
+.result__checks { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.result__info[hidden], .result__checks[hidden] { display: none; }
+.check { display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 14px; font-weight: 700; }
+.check.is-ok { background: var(--lime); color: var(--ink); }
+.check.is-miss { background: transparent; color: var(--text); border: 2px dashed var(--alert); }
+
+/* ---------- Voorkeur 1: platteland ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Voorkeur 2: weinig bochten ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Voorkeur 3: drukke hoofdwegen vermijden ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Voorkeur 4: ondergrond ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Voorkeur 5: hoogteverschil ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Voorkeur 6: richting kiezen ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Functie 7: tijd in plaats van km ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Functie 8: via een punt naar keuze ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
+/* ---------- Functie 9: paneel inklappen ----------
+   (eigen blok; los terug te draaien via de bijbehorende commit) */
+
 /* ---------- Live-modus: kaart krijgt voorrang ---------- */
 body.is-running .topbar__actions { visibility: hidden; pointer-events: none; }
 body.is-running .sheet__grip { display: none; }

@@ -31,9 +31,10 @@
 
   const TOLERANCE_M = 250;          // max. verschil met de gevraagde afstand (minimaal)…
   const TOLERANCE_REL = 0.03;       // …en vanaf ~8 km relatief: 3% van de gevraagde afstand
-  const MAX_ATTEMPTS = 8;           // max. aantal ORS-aanvragen per "Genereer route"
-  const MAX_ATTEMPTS_LONG = 12;     // vanaf LONG_ROUTE_M: lange rondjes dubbelen vaker, dus meer kansen
-  const LONG_ROUTE_M = 10000;
+  const PRIORITY_DEV_REL = 0.05;    // bij het kiezen tussen kandidaten: eerst "binnen 5%"
+  const MAX_ATTEMPTS = 8;           // max. aantal ORS-aanvragen per "Genereer route" (gratis plan)
+  const ORS_PER_MINUTE = 36;        // ORS staat 40 per minuut toe (glijdend venster); marge voor andere tabbladen
+  const ORS_WINDOW_MS = 60000;
   const LENGTH_OBS_LIMIT = 40;      // zoveel recente (lengte, verhouding)-metingen bewaren
   const MAX_SAME_SEED = 3;          // lengte bijstellen met dezelfde vorm, daarna andere vorm
   const OVERLAP_ALLOWED_M = 30;     // dubbel lopen buiten de start/finish-zone
@@ -48,6 +49,8 @@
     apiKey: 'hrg.orsKey',
     distance: 'hrg.distance',
     lengthObs: 'hrg.lengthObs.v1',
+    prefs: 'hrg.prefs.v1',
+    orsLog: 'hrg.orsLog.v1',
   };
 
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -75,6 +78,10 @@
     result: $('result'),
     resultKm: $('resultKm'),
     resultMeta: $('resultMeta'),
+    resultInfo: $('resultInfo'),
+    resultChecks: $('resultChecks'),
+    prefsList: $('prefsList'),
+    prefsSummary: $('prefsSummary'),
     tileBar: $('tileBar'),
     tileText: $('tileText'),
     btnAgain: $('btnAgain'),
@@ -174,6 +181,32 @@
       this.fatal = fatal;
     }
   }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  // Gebeurtenissen voor losse functies (bijv. het paneel): 'route-shown', 'route-cleared',
+  // 'generate-start', 'run-start', 'run-stop'.
+  function emit(name, detail) {
+    document.dispatchEvent(new CustomEvent(`hrg:${name}`, { detail }));
+  }
+
+  // Aanhaakpunten: de standaard is "afstand in km". Functies verderop mogen ze vervangen.
+  const hooks = {
+    readTarget: () => { const km = readKm(); return km ? { meters: km * 1000 } : null; },
+    step: (dir) => {
+      const cur = parseKm(els.distanceInput.value) || 5;
+      setKm(dir < 0 ? Math.ceil(cur / STEP_KM) * STEP_KM - STEP_KM : Math.floor(cur / STEP_KM) * STEP_KM + STEP_KM);
+    },
+    chip: (chip) => setKm(Number(chip.dataset.km)),
+    inputChange: () => {
+      const km = parseKm(els.distanceInput.value);
+      if (Number.isFinite(km)) setKm(km, { bump: false });
+    },
+    requestedText: (entry) => `Gevraagd ${nfKm.format(entry.requested / 1000)} km`,
+    restoreInput: (entry) => setKm(entry.requested / 1000, { bump: false }),
+    mapClick: () => false, // true = klik is afgehandeld (niet als startpunt gebruiken)
+  };
 
   // ---------------------------------------------------------------------------
   // Toestand
@@ -450,6 +483,7 @@
 
   map.on('click', (e) => {
     if (state.run || state.generating) return;
+    if (hooks.mapClick(e)) return;
     const hadRoute = !!state.route;
     setStart([e.latlng.lat, e.latlng.lng], 'manual');
     if (hadRoute && !state.route) {
@@ -509,19 +543,10 @@
     return km;
   }
 
-  els.btnMinus.addEventListener('click', () => {
-    const cur = parseKm(els.distanceInput.value) || 5;
-    setKm(Math.ceil(cur / STEP_KM) * STEP_KM - STEP_KM);
-  });
-  els.btnPlus.addEventListener('click', () => {
-    const cur = parseKm(els.distanceInput.value) || 5;
-    setKm(Math.floor(cur / STEP_KM) * STEP_KM + STEP_KM);
-  });
-  els.chips.forEach((chip) => chip.addEventListener('click', () => setKm(Number(chip.dataset.km))));
-  els.distanceInput.addEventListener('change', () => {
-    const km = parseKm(els.distanceInput.value);
-    if (Number.isFinite(km)) setKm(km, { bump: false });
-  });
+  els.btnMinus.addEventListener('click', () => hooks.step(-1));
+  els.btnPlus.addEventListener('click', () => hooks.step(1));
+  els.chips.forEach((chip) => chip.addEventListener('click', () => hooks.chip(chip)));
+  els.distanceInput.addEventListener('change', () => hooks.inputChange());
   els.distanceInput.addEventListener('focus', () => els.distanceInput.select());
   els.distanceInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -580,6 +605,10 @@
   function orsError(status, body) {
     const code = body && body.error && (body.error.code ?? body.error);
     const apiMsg = body && body.error && body.error.message;
+    if (status === 403 && /quota|limit/i.test(JSON.stringify(body || ''))) {
+      return new AppError('Daglimiet bereikt',
+        'Je hebt vandaag alle gratis routeverzoeken van OpenRouteService gebruikt (2000 per dag). Morgen kan het weer.', { fatal: true });
+    }
     if (status === 401 || status === 403) {
       return new AppError('Sleutel werkt niet',
         'OpenRouteService weigert je API-sleutel. Controleer of je hem goed hebt geplakt, of maak een nieuwe aan.', { fatal: true });
@@ -610,7 +639,32 @@
   // Alleen stappen die een richtingsverandering zijn, compact opgeslagen.
   const TURN_TYPES = new Set([0, 1, 2, 3, 4, 5, 7, 9, 12, 13]);
 
-  async function requestRoundTrip(start, meters, seed, key) {
+  // Minuutlimiet van ORS (glijdend venster van 60 s): wachten tot er ruimte is. Het logboek
+  // staat in localStorage, zodat ook herladen of een tweede tabblad meetelt.
+  let orsLogMem = [];
+  function recentOrsCalls(now) {
+    const saved = store.get(KEYS.orsLog, []);
+    const all = (Array.isArray(saved) ? saved : []).concat(orsLogMem);
+    return [...new Set(all)].filter((t) => now - t < ORS_WINDOW_MS).sort((x, y) => x - y);
+  }
+  async function waitForOrsSlot(onWait) {
+    for (;;) {
+      const now = Date.now();
+      const log = recentOrsCalls(now);
+      if (log.length < ORS_PER_MINUTE) {
+        log.push(now);
+        orsLogMem = log;
+        store.set(KEYS.orsLog, log);
+        return;
+      }
+      onWait(Math.ceil((ORS_WINDOW_MS - (now - log[0])) / 1000));
+      await sleep(1000);
+    }
+  }
+
+  // Eén ORS-verzoek. Alle extra_info en de hoogte zitten in hetzelfde verzoek (buildRequest).
+  async function requestRoute(body, key, onWait = () => {}) {
+    await waitForOrsSlot(onWait);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ORS_TIMEOUT_MS);
     let res;
@@ -623,14 +677,7 @@
           'Content-Type': 'application/json',
           'Accept': 'application/geo+json, application/json',
         },
-        body: JSON.stringify({
-          coordinates: [[start[1], start[0]]], // ORS verwacht [lng, lat]
-          instructions: true,
-          instructions_format: 'text',
-          language: 'nl',
-          elevation: false,
-          options: { round_trip: { length: Math.round(meters), points: 3, seed } },
-        }),
+        body: JSON.stringify(body),
       });
     } catch (err) {
       if (err.name === 'AbortError') {
@@ -641,11 +688,11 @@
       clearTimeout(timer);
     }
 
-    let body = null;
-    try { body = await res.json(); } catch { /* geen JSON */ }
-    if (!res.ok) throw orsError(res.status, body);
+    let json = null;
+    try { json = await res.json(); } catch { /* geen JSON */ }
+    if (!res.ok) throw orsError(res.status, json);
 
-    const feature = body && body.features && body.features[0];
+    const feature = json && json.features && json.features[0];
     const line = feature && feature.geometry && feature.geometry.coordinates;
     if (!line || line.length < 2) {
       throw new AppError('Geen route gevonden',
@@ -671,13 +718,43 @@
         w: st.way_points[0],
         x: st.exit_number || 0,
       }));
-    return { coords, distance, steps };
+    const extras = {};
+    Object.entries(props.extras || {}).forEach(([kind, v]) => {
+      if (v && Array.isArray(v.values)) extras[kind] = v.values;
+    });
+    return { coords, distance, steps, extras, ascent: props.ascent, descent: props.descent };
+  }
+
+  function cumulativeMeters(coords) {
+    const cum = new Float64Array(coords.length);
+    for (let i = 1; i < coords.length; i++) cum[i] = cum[i - 1] + haversine(coords[i - 1], coords[i]);
+    return cum;
+  }
+
+  // Meters per waarde van één extra_info-soort ('surface', 'waytype', …), geschaald naar de
+  // routelengte van ORS. ORS levert [vanIndex, totIndex, waarde] per stuk.
+  function extraMeters(cand, kind) {
+    const values = cand.extras && cand.extras[kind];
+    if (!values || !values.length) return null;
+    const cum = cand.cumM || (cand.cumM = cumulativeMeters(cand.coords));
+    const last = cum.length - 1;
+    const out = {};
+    let sum = 0;
+    values.forEach(([from, to, value]) => {
+      const m = Math.max(0, cum[Math.min(to, last)] - cum[Math.min(from, last)]);
+      out[value] = (out[value] || 0) + m;
+      sum += m;
+    });
+    const scale = sum > 0 ? cand.distance / sum : 1;
+    Object.keys(out).forEach((v) => { out[v] *= scale; });
+    return out;
   }
 
   // Meet hoeveel meter van de route je dubbel loopt (heen en terug over hetzelfde stuk,
   // of er vlak naast). Kruisingen tellen niet mee: alleen (anti)parallelle stukken.
-  // Rond start/finish mag het (je eigen straat uit en weer in).
-  function measureOverlap(coords) {
+  // Rond start/finish mag het (je eigen straat uit en weer in), en rond freePoints ook
+  // (bijv. een zelfgekozen via-punt aan het eind van een doodlopend pad).
+  function measureOverlap(coords, freePoints = []) {
     const geo = prepareGeo(coords);
     const { pts, cum, total } = geo;
     const STEP = 10;
@@ -699,7 +776,9 @@
         a,
       });
     }
-    const inZone = (a) => a < START_ZONE_M || a > total - START_ZONE_M;
+    const free = freePoints.map(([la, ln]) => geo.proj.fwd(la, ln));
+    const inZone = (s) => s.a < START_ZONE_M || s.a > total - START_ZONE_M
+      || free.some(([fx, fy]) => Math.hypot(s.x - fx, s.y - fy) < START_ZONE_M);
     const hit = new Uint8Array(samples.length);
     for (let i = 0; i < samples.length; i++) {
       const s = samples[i];
@@ -711,7 +790,7 @@
         const dy = q.y - s.y;
         if (dx * dx + dy * dy > NEAR * NEAR) continue;
         if (Math.abs(s.ux * q.ux + s.uy * q.uy) < 0.85) continue; // kruising, geen dubbel stuk
-        if (inZone(s.a) && inZone(q.a)) continue;
+        if (inZone(s) && inZone(q)) continue;
         hit[i] = 1;
         hit[j] = 1;
       }
@@ -728,9 +807,10 @@
   // ORS wijkt per afstand anders af, dus alleen metingen van vergelijkbare lengte tellen
   // (gewicht valt weg met de log-verhouding). Gewogen gemiddelde van de metingen rond de
   // gewogen mediaan: uitschieters (een rare vorm) tellen niet mee, en het springt minder.
-  function predictLengthRatio(meters) {
-    const obs = store.get(KEYS.lengthObs, []);
-    const items = [{ r: 1.05, w: 0.5 }]; // zwakke startwaarde zolang er weinig metingen zijn
+  // Elke strategie (round trip, via-punt) heeft een eigen geheugen (storeKey).
+  function predictLengthRatio(meters, storeKey = KEYS.lengthObs, prior = 1.05) {
+    const obs = store.get(storeKey, []);
+    const items = [{ r: prior, w: 0.5 }]; // zwakke startwaarde zolang er weinig metingen zijn
     if (Array.isArray(obs)) {
       obs.forEach(([m, r], i) => {
         if (!(m > 0 && r > 0)) return;
@@ -742,7 +822,7 @@
     items.sort((a, b) => a.r - b.r);
     const half = items.reduce((sum, it) => sum + it.w, 0) / 2;
     let acc = 0;
-    let median = 1.05;
+    let median = prior;
     for (const it of items) {
       acc += it.w;
       if (acc >= half) { median = it.r; break; }
@@ -753,28 +833,90 @@
     return clamp(mean, 0.7, 1.6);
   }
 
-  function rememberLength(distance, asked) {
-    const obs = store.get(KEYS.lengthObs, []);
+  function rememberLength(distance, asked, storeKey = KEYS.lengthObs) {
+    const obs = store.get(storeKey, []);
     const list = Array.isArray(obs) ? obs : [];
     list.push([Math.round(distance), Math.round((distance / asked) * 1000) / 1000]);
-    store.set(KEYS.lengthObs, list.slice(-LENGTH_OBS_LIMIT));
+    store.set(storeKey, list.slice(-LENGTH_OBS_LIMIT));
   }
 
-  // Vraagt meerdere rondjes aan en past de gevraagde lengte bij tot het rondje
-  // binnen de marge valt en niet dubbelt. Geeft anders het beste resultaat terug.
-  async function findRoundTrip(start, target, key, onProgress) {
-    const maxAttempts = target >= LONG_ROUTE_M ? MAX_ATTEMPTS_LONG : MAX_ATTEMPTS;
+  // Hoe een kandidaat wordt aangevraagd. Standaard een ORS round trip vanaf het startpunt;
+  // een functie (bijv. "via een punt") kan in prepare() een eigen strategie kiezen.
+  const roundTripStrategy = {
+    ratioKey: KEYS.lengthObs,
+    ratioPrior: 1.05,
+    askedRange: (ctx) => [ctx.target * 0.6, ctx.target * 1.4],
+    body: (ctx, asked, seed) => ({
+      coordinates: [[ctx.start[1], ctx.start[0]]], // ORS verwacht [lng, lat]
+      options: { round_trip: { length: Math.round(asked), points: 3, seed } },
+    }),
+  };
+
+  function buildRequest(ctx, asked, seed) {
+    const body = {
+      ...ctx.strategy.body(ctx, asked, seed),
+      instructions: true,
+      instructions_format: 'text',
+      language: 'nl',
+      elevation: false,
+      extra_info: [],
+    };
+    // Elke functie vult hier aan wat hij nodig heeft (extra_info, hoogte, richting) —
+    // alles in dit ene verzoek, nooit een extra verzoek.
+    features.forEach((f) => f.request && f.request(body, ctx, seed));
+    body.extra_info = [...new Set(body.extra_info)];
+    if (!body.extra_info.length) delete body.extra_info;
+    return body;
+  }
+
+  function evaluateCandidate(cand, ctx) {
+    cand.dev = Math.abs(cand.distance - ctx.target);
+    cand.within5 = cand.dev <= ctx.target * PRIORITY_DEV_REL;
+    cand.overlap = measureOverlap(cand.coords, ctx.overlapFree);
+    cand.uturn = cand.steps.some((s) => s.t === 9);
+    cand.clean = cand.overlap <= OVERLAP_ALLOWED_M && !cand.uturn;
+    cand.stats = { ascent: cand.ascent, descent: cand.descent };
+    features.forEach((f) => f.analyze && f.analyze(cand, ctx));
+    cand.hard = [];
+    cand.soft = [];
+    features.forEach((f) => {
+      if (!f.active || !f.active()) return;
+      if (f.hard) cand.hard.push({ id: f.id, ...f.hard(cand, ctx) });
+      if (f.soft) cand.soft.push({ id: f.id, ...f.soft(cand, ctx) });
+    });
+    cand.hardFails = cand.hard.filter((h) => !h.ok).length;
+    cand.hardOk = cand.hardFails === 0;
+    cand.softOk = cand.soft.every((s) => s.ok);
+    cand.softScore = cand.soft.reduce((sum, s) => sum + s.weight * clamp(s.score, 0, 1), 0);
+  }
+
+  // Prioriteit bij het kiezen: 1. binnen 5% van de gevraagde afstand, 2. niet dubbel,
+  // 3. harde eisen (via-punt, richting, max. stijgen), 4–7. voorkeuren met afnemend gewicht
+  // (drukke wegen > ondergrond > platteland > bochten), daarna de kleinste afwijking.
+  function betterCandidate(a, b, target) {
+    if (!b) return true;
+    if (a.within5 !== b.within5) return a.within5;
+    if (!a.within5) { // allebei te kort of te lang: eerst niet dubbel, dan het dichtst bij
+      if (a.clean !== b.clean) return a.clean;
+      return a.dev + a.overlap * 3 < b.dev + b.overlap * 3;
+    }
+    if (a.clean !== b.clean) return a.clean;
+    if (a.hardFails !== b.hardFails) return a.hardFails < b.hardFails;
+    const rest = (c) => c.softScore + (c.dev + c.overlap * 3) / target;
+    return rest(a) < rest(b);
+  }
+
+  // Vraagt kandidaten aan (max. MAX_ATTEMPTS), past de gevraagde lengte bij tot het rondje
+  // binnen de marge valt, en houdt altijd de beste kandidaat vast.
+  async function findRoute(ctx, key, onProgress, onWait) {
+    const { target, strategy } = ctx;
     const tolerance = lengthTolerance(target);
+    const [minAsked, maxAsked] = strategy.askedRange(ctx);
     let seed = newSeed();
     let tries = []; // { asked, got } met de huidige seed (zelfde vorm)
     let best = null;
     let lastErr = null;
     let attemptsMade = 0;
-    const better = (a, b) => {
-      if (!b) return true;
-      if (a.clean !== b.clean) return a.clean;
-      return a.dev + a.overlap * 3 < b.dev + b.overlap * 3;
-    };
     // Volgende gevraagde lengte: met twee pogingen van dezelfde vorm de lijn ertussen
     // doortrekken (secant), met één poging de verhouding daarvan, anders het geleerde model.
     const nextAsked = () => {
@@ -789,20 +931,20 @@
         const q = tries[n - 1];
         return q.asked * (target / q.got);
       }
-      return target / predictLengthRatio(target);
+      return target / predictLengthRatio(target, strategy.ratioKey, strategy.ratioPrior);
     };
     const switchSeed = () => {
       seed = newSeed();
       tries = [];
     };
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      onProgress(attempt, maxAttempts);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      onProgress(attempt, MAX_ATTEMPTS);
       attemptsMade = attempt;
-      const asked = clamp(nextAsked(), target * 0.6, target * 1.4);
+      const asked = clamp(nextAsked(), minAsked, maxAsked);
       let cand;
       try {
-        cand = await requestRoundTrip(start, asked, seed, key);
+        cand = await requestRoute(buildRequest(ctx, asked, seed), key, onWait);
       } catch (err) {
         lastErr = err;
         if (err.fatal) {
@@ -814,27 +956,25 @@
       }
 
       // Leren hoe ORS de lengte "opvat", per afstand: volgende routes starten dichterbij.
-      rememberLength(cand.distance, asked);
+      rememberLength(cand.distance, asked, strategy.ratioKey);
       tries.push({ asked, got: cand.distance });
 
       cand.seed = seed;
-      cand.dev = Math.abs(cand.distance - target);
-      cand.overlap = measureOverlap(cand.coords);
-      cand.uturn = cand.steps.some((s) => s.t === 9);
-      cand.clean = cand.overlap <= OVERLAP_ALLOWED_M && !cand.uturn;
       cand.attempts = attempt;
-      if (better(cand, best)) best = cand;
-      if (cand.clean && cand.dev <= tolerance) return { ...cand, ok: true };
+      evaluateCandidate(cand, ctx);
+      if (betterCandidate(cand, best, target)) best = cand;
+      const lengthOk = cand.dev <= tolerance;
+      if (cand.clean && lengthOk && cand.hardOk && cand.softOk) return { ...cand, ok: true };
 
-      if (!cand.clean || tries.length >= MAX_SAME_SEED) {
-        switchSeed(); // vorm is het probleem (of convergeert niet): andere richting
-      }
+      // Andere vorm als de vorm het probleem is (dubbel, eis of voorkeur niet gehaald bij een
+      // goede lengte), of als bijstellen met deze vorm niet convergeert.
+      if (!cand.clean || !cand.hardOk || lengthOk || tries.length >= MAX_SAME_SEED) switchSeed();
     }
     if (!best) {
       throw lastErr || new AppError('Geen route gevonden',
         'Er kon geen rondje gevonden worden vanaf dit startpunt. Probeer een ander startpunt of een andere afstand.', { retry: true });
     }
-    return { ...best, attempts: attemptsMade, ok: best.clean && best.dev <= tolerance };
+    return { ...best, attempts: attemptsMade, ok: best.clean && best.dev <= tolerance && best.hardOk };
   }
 
   function setBusy(btn, busy, label) {
@@ -850,8 +990,8 @@
         { action: { label: 'Locatie', onClick: () => locate() } });
       return;
     }
-    const km = readKm();
-    if (!km) return;
+    const want = hooks.readTarget();
+    if (!want) return;
     const key = getApiKey();
     if (!key) {
       showNotice('warn', 'API-sleutel nodig', 'Voeg eerst je gratis OpenRouteService-sleutel toe.',
@@ -863,6 +1003,18 @@
       return;
     }
 
+    const start = state.start.latlng;
+    const target = want.meters;
+    const ctx = { start, target, strategy: roundTripStrategy, overlapFree: [] };
+    try {
+      // Functies kunnen hier de strategie kiezen of vooraf weigeren (bijv. via-punt te ver weg).
+      features.forEach((f) => f.active && f.active() && f.prepare && f.prepare(ctx));
+    } catch (err) {
+      if (!(err instanceof AppError)) throw err;
+      showNotice('warn', err.title, err.message);
+      return;
+    }
+
     const again = !!state.route;
     const btn = again ? els.btnAgain : els.btnGenerate;
     const oldLabel = again ? 'Andere route' : 'Genereer route';
@@ -870,23 +1022,28 @@
     setBusy(btn, true, 'Route zoeken…');
     els.btnStart.disabled = true;
     hideNotice();
+    emit('generate-start');
 
     try {
-      const start = state.start.latlng;
-      const target = km * 1000;
-      const found = await findRoundTrip(start, target, key, (n, max) => {
+      const found = await findRoute(ctx, key, (n, max) => {
         btn.querySelector('.btn__label').textContent = n === 1 ? 'Route zoeken…' : `Zoeken… ${n}/${max}`;
+      }, (secs) => {
+        btn.querySelector('.btn__label').textContent = `Limiet ORS: ${secs} s…`;
       });
+      const { meters, ...wantInfo } = want;
       const entry = {
         id: `r${Date.now().toString(36)}${found.seed.toString(36)}`,
         createdAt: Date.now(),
         requested: target,
+        ...wantInfo,
         distance: found.distance,
         seed: found.seed,
         start,
         coords: found.coords,
         steps: found.steps,
         overlap: Math.round(found.overlap),
+        stats: found.stats,
+        checks: [...found.hard, ...found.soft].map(({ text, ok }) => ({ text, ok })),
         walkedAt: null,
         run: null,
       };
@@ -903,6 +1060,7 @@
             ? 'Er zit een punt in waar je moet omkeren.'
             : `Er zit ongeveer ${Math.round(found.overlap / 10) * 10} m in die je heen en terug loopt.`);
         }
+        found.hard.filter((h) => !h.ok && h.failText).forEach((h) => parts.push(h.failText));
         showNotice('warn', 'Beste rondje dat er was',
           `Na ${found.attempts} pogingen geen perfect rondje gevonden. ${parts.join(' ')} Tik op "Andere route" om verder te zoeken.`,
           { action: { label: 'Nog eens', onClick: generateRoute } });
@@ -1053,7 +1211,7 @@
     const diff = entry.distance - entry.requested;
     const within = Math.abs(diff) <= lengthTolerance(entry.requested);
     els.resultKm.textContent = nf2.format(entry.distance / 1000);
-    const reqTxt = `Gevraagd ${nfKm.format(entry.requested / 1000)} km`;
+    const reqTxt = escapeHtml(hooks.requestedText(entry));
     const sign = Math.abs(diff) < 5 ? '±' : diff > 0 ? '+' : '−';
     const diffTxt = `<mark${within ? '' : ' class="is-far"'}>${sign}${nf2.format(Math.abs(diff) / 1000)} km${within ? ' ✓' : ''}</mark>`;
     let overlapTxt = '';
@@ -1063,13 +1221,35 @@
         : ` · <mark class="is-far">~${Math.round(entry.overlap / 10) * 10} m dubbel</mark>`;
     }
     els.resultMeta.innerHTML = `${reqTxt} · ${diffTxt}${overlapTxt}`;
+    renderRouteDetails(entry);
     els.result.hidden = false;
     els.planView.classList.add('has-route');
-    setKm(entry.requested / 1000, { bump: false });
+    hooks.restoreInput(entry);
 
-    map.fitBounds(routeLine.getBounds(), { ...fitPadding(), maxZoom: 16, animate: false });
+    fitRoute();
     animateLine(routeLine);
     prefetchTiles(route.coords);
+    emit('route-shown', entry);
+  }
+
+  // Route precies in het zichtbare deel van de kaart (tussen topbalk en paneel).
+  function fitRoute({ animate = false } = {}) {
+    if (routeLine) map.fitBounds(routeLine.getBounds(), { ...fitPadding(), maxZoom: 16, animate });
+  }
+
+  // Onder de route: gegevens per functie (hoogte, ondergrond, …) en welke voorkeuren
+  // gehaald zijn. Oude opgeslagen routes hebben geen stats: dan blijft dit leeg.
+  function renderRouteDetails(entry) {
+    const info = entry.stats
+      ? features.map((f) => (f.info ? f.info(entry.stats, entry) : '')).filter(Boolean)
+      : [];
+    els.resultInfo.innerHTML = info.map((t) => `<li>${escapeHtml(t)}</li>`).join('');
+    els.resultInfo.hidden = !info.length;
+    const checks = entry.checks || [];
+    els.resultChecks.innerHTML = checks.map((c) => `<li class="check ${c.ok ? 'is-ok' : 'is-miss'}">`
+      + `<span aria-hidden="true">${c.ok ? '✓' : '✗'}</span>`
+      + `<span class="visually-hidden">${c.ok ? 'Gehaald:' : 'Niet gehaald:'}</span> ${escapeHtml(c.text)}</li>`).join('');
+    els.resultChecks.hidden = !checks.length;
   }
 
   function clearRoute() {
@@ -1082,6 +1262,7 @@
     prefetchToken++;
     els.result.hidden = true;
     els.planView.classList.remove('has-route');
+    emit('route-cleared');
   }
 
   // ---------------------------------------------------------------------------
@@ -1581,6 +1762,7 @@
       }
     }, 1000);
 
+    emit('run-start');
     focusOn(state.start.latlng, 17, false);
     await requestWakeLock();
   }
@@ -1752,6 +1934,7 @@
     els.btnLocate.classList.remove('is-lost');
     els.runView.hidden = true;
     els.planView.hidden = false;
+    emit('run-stop');
 
     if (!silent) {
       speech.say('Gestopt.', { interrupt: true });
@@ -1807,8 +1990,178 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Voorkeuren — basis
+  // Elke voorkeur/functie staat hieronder in een eigen blok en meldt zich aan met
+  // registerFeature(). Haal je zo'n blok weg, dan werkt de rest gewoon door.
+  //
+  // Een functie kan hebben:
+  //   defaults                 standaardwaarden (onthouden in localStorage)
+  //   ui()                     bediening opbouwen (in "Voorkeuren" of elders)
+  //   active()                 doet hij nu mee bij het kiezen tussen kandidaten?
+  //   label()                  korte tekst voor de samenvatting van het paneel
+  //   prepare(ctx)             vóór het zoeken: strategie kiezen, of weigeren met een AppError
+  //   request(body, ctx, seed) het ene ORS-verzoek aanvullen (extra_info, hoogte, richting)
+  //   analyze(cand, ctx)       cand.stats vullen
+  //   hard(cand, ctx)          eis, prioriteit 3: { ok, text, failText }
+  //   soft(cand, ctx)          voorkeur: { ok, text, score 0..1 (lager = beter), weight }
+  //                            gewichten volgen de prioriteit: drukke wegen 8, ondergrond 4,
+  //                            platteland 2, bochten 1
+  //   info(stats, entry)       regel onder de route
+  // ---------------------------------------------------------------------------
+  const features = [];
+  const prefs = {};
+
+  function registerFeature(def) {
+    features.push(def);
+    Object.assign(prefs, def.defaults || {});
+  }
+
+  function loadPrefs() {
+    const saved = store.get(KEYS.prefs, null);
+    if (!saved || typeof saved !== 'object') return;
+    Object.keys(prefs).forEach((k) => {
+      const v = saved[k];
+      if (v === undefined) return;
+      if (v === null || prefs[k] === null || typeof v === typeof prefs[k]) prefs[k] = v;
+    });
+  }
+
+  function setPref(k, v) {
+    prefs[k] = v;
+    const saved = store.get(KEYS.prefs, {});
+    store.set(KEYS.prefs, { ...(saved && typeof saved === 'object' ? saved : {}), ...prefs });
+    renderPrefsSummary();
+  }
+
+  function renderPrefsSummary() {
+    const on = features.filter((f) => f.label && f.active && f.active()).map((f) => f.label());
+    els.prefsSummary.textContent = on.length ? on.join(' · ') : 'Geen: elk goed rondje telt.';
+  }
+
+  // Bouwstenen voor het paneel. Een rij = titel + bediening (+ uitleg).
+  function prefRow(id, title, hint = '') {
+    const row = document.createElement('div');
+    row.className = 'pref';
+    row.dataset.pref = id;
+    const head = document.createElement('p');
+    head.className = 'pref__title';
+    head.id = `pref-${id}-title`;
+    head.textContent = title;
+    row.append(head);
+    if (hint) {
+      const p = document.createElement('p');
+      p.className = 'pref__hint';
+      p.id = `pref-${id}-hint`;
+      p.textContent = hint;
+      row.append(p);
+    }
+    els.prefsList.append(row);
+    return row;
+  }
+
+  function prefSwitch(row, key, onChange) {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'switch';
+    input.setAttribute('role', 'switch');
+    input.setAttribute('aria-labelledby', `${row.querySelector('.pref__title').id}`);
+    const hint = row.querySelector('.pref__hint');
+    if (hint) input.setAttribute('aria-describedby', hint.id);
+    input.checked = !!prefs[key];
+    input.addEventListener('change', () => {
+      setPref(key, input.checked);
+      if (onChange) onChange(input.checked);
+    });
+    row.classList.add('pref--switch');
+    row.append(input);
+    return input;
+  }
+
+  function prefChoice(row, key, options, onChange) {
+    const group = document.createElement('div');
+    group.className = 'seg';
+    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('aria-labelledby', row.querySelector('.pref__title').id);
+    options.forEach(({ value, text, aria }) => {
+      const label = document.createElement('label');
+      label.className = 'seg__opt';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = `pref-${key}`;
+      input.value = String(value);
+      input.checked = prefs[key] === value;
+      if (aria) input.setAttribute('aria-label', aria);
+      input.addEventListener('change', () => {
+        if (!input.checked) return;
+        setPref(key, value);
+        if (onChange) onChange(value);
+      });
+      const span = document.createElement('span');
+      span.textContent = text;
+      span.setAttribute('aria-hidden', aria ? 'true' : 'false');
+      label.append(input, span);
+      group.append(label);
+    });
+    row.append(group);
+    return group;
+  }
+
+  // Meters → aandeel van de route (0..1)
+  const shareOf = (m, cand) => (cand.distance > 0 ? m / cand.distance : 0);
+  const pct = (x) => `${Math.round(x * 100)}%`;
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 1: platteland
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 2: weinig bochten
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 3: drukke hoofdwegen vermijden
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 4: ondergrond
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 5: hoogteverschil
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Voorkeur 6: richting kiezen
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Functie 7: tijd in plaats van km
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Functie 8: via een punt naar keuze
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Functie 9: paneel inklappen
+  // (eigen blok; los terug te draaien via de bijbehorende commit)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
   // Opstarten
   // ---------------------------------------------------------------------------
+  loadPrefs();
+  features.forEach((f) => f.ui && f.ui());
+  renderPrefsSummary();
+
   if (!getApiKey()) {
     showNotice('warn', 'API-sleutel nodig',
       'Voeg je gratis OpenRouteService-sleutel toe om routes te kunnen maken.',
