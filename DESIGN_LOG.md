@@ -200,3 +200,44 @@ meegenomen in deze versie.
   gecomposite lagen (ook niet in een minimale testpagina). Op de iPhone zelf nakijken.
 - `hadController` in `app.js` negeert updates in dezelfde sessie als de eerste installatie (bekend
   sinds sessie 5, bewust ongemoeid gelaten).
+
+## Sessie 7 — 2026-10-22: Voorkeuren en paneel (v1.3.0)
+
+### ORS eerst getest (documentatie + echte verzoeken, foot-walking)
+- `profile_params.weightings.green/quiet`: object-vorm geeft 400; integer-vorm wordt geaccepteerd
+  maar levert exact dezelfde round trip op. extra_info `green` en `noise` hebben in Nederland geen
+  data (overal 10 resp. 7). → Platteland en drukke wegen worden **achteraf gescoord** met
+  extra_info `waytype`/`waycategory`/`surface`.
+- `extra_info` en `elevation` werken met round_trip én met waypoints, in hetzelfde verzoek.
+- `bearings` bij round_trip zet de beginkoers; het middelpunt van het rondje ligt ~35° rechtsom.
+- Round trip kan niet via een punt → eigen strategie met waypoints.
+
+### Beslissingen
+| Beslissing | Waarom |
+|---|---|
+| Basis met `registerFeature()`, haken (hooks) en events; elke functie in een eigen blok met vaste ankerplekken in app.js, style.css en de test | Elke functie apart terug te draaien. Gecontroleerd: per functie `git revert` zonder conflict, daarna slaagt de rest van de suite |
+| Gedeelde testhulpmiddelen in een eigen commit | Stonden eerst in de commits van functie 1 en 4, waardoor die niet los terug konden |
+| Kiezen in volgorde: binnen 5% → niet dubbel → harde eisen (via, richting, max. stijgen) → gewogen voorkeuren (drukke wegen 8, ondergrond 4, platteland 2, bochten 1) | Prioriteit van de gebruiker; gewogen i.p.v. strikt lexicografisch, zodat 1 m minder drukke weg niet alles wint |
+| Max. 8 verzoeken per keer (ook ≥ 10 km; was 12) + glijdend minuutvenster (36/60 s) in localStorage | Gratis plan; herladen of tweede tabblad telt mee |
+| Richting via `bearings` | Gemeten tegen tussenpunten op een cirkel: lengte ±6% vs ±10%, niet dubbel 11/16 vs 2/16; filteren kost te veel verzoeken |
+| Via-punt: lus (cirkel, of smalle ellips) door start en via, tussenpunten op beide bogen, `continue_straight` | Heen en terug over andere wegen; ellips maakt kortere rondjes mogelijk (minimum ±2,9× de afstand tot het punt) |
+| Ondergrond: onbekend (in NL ~60%) afleiden uit wegtype (straat/weg/fietspad/stoep = verhard, landweg = onverhard) | Anders is "verhard" vrijwel nooit te halen |
+| Paneel: drie standen, alleen < 768 px; inpassen van de route alleen bij "ingeklapt", na een lopende zoomanimatie, 200 ms na een resize | Bij "half" blijft te weinig kaart over; Leaflet negeert zoom tijdens animatie; Safari schuift de adresbalk in stapjes |
+
+### Getest
+`tests/e2e.mjs` (WebKit, iPhone-emulatie), nep-ORS: alle controles groen; per functie ook met de
+echte ORS (Utrecht en Alphen aan den Rijn). Gevonden en opgelost onderweg: paneelinhoud niet
+scrollbaar (grid groeide buiten de max-hoogte), een tik op het greepje die na een snelle veeg werd
+genegeerd, en route niet opnieuw ingepast na het verdwijnen van de adresbalk.
+
+### Wat kon beter / open
+- Via-routes lopen vaker een stukje dubbel (~50% van de kandidaten schoon) en zijn minder precies
+  in lengte dan gewone rondjes.
+- Platteland is in NL een benadering (paden/landwegen/onverhard), geen echte groendata.
+- Hoogte in vlak NL: ~20 m "stijgen" per 5 km is ruis van het hoogtemodel, dijken en bruggen.
+- "Adresbalk onderin" is benaderd met een lagere viewport; echte Safari-chrome is niet te emuleren.
+
+### Technieken
+CustomEvents tussen losse blokken, `inert` op verborgen paneelinhoud, pointer capture met
+snelheid-snapping, `role="switch"`-checkboxes en radiogroepen, Ramanujan-ellipsomtrek met
+bisectie, Playwright-route-onderschepping als nep-ORS.
