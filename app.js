@@ -8,7 +8,7 @@
   // ---------------------------------------------------------------------------
   // Instellingen
   // ---------------------------------------------------------------------------
-  const CONFIG = Object.assign({ ORS_API_KEY: '', OFF_ROUTE_METERS: 20 }, window.HRG_CONFIG || {});
+  const CONFIG = Object.assign({ OFF_ROUTE_METERS: 20 }, window.HRG_CONFIG || {});
 
   const ORS_URL = 'https://api.heigit.org/openrouteservice/v2/directions/foot-walking/geojson';
   const ORS_TIMEOUT_MS = 25000;
@@ -561,11 +561,10 @@
   // ---------------------------------------------------------------------------
   // API-sleutel
   // ---------------------------------------------------------------------------
+  // De sleutel staat alleen op dit apparaat (sleutel-icoon), nooit in de code: config.js is
+  // openbaar. Een sleutel in config.js wordt bewust genegeerd.
   function getApiKey() {
-    const local = store.get(KEYS.apiKey, '');
-    if (local) return local;
-    const cfg = String(CONFIG.ORS_API_KEY || '').trim();
-    return cfg && !/jouw|your|hier/i.test(cfg) ? cfg : '';
+    return String(store.get(KEYS.apiKey, '') || '').trim();
   }
 
   function openKeyDialog() {

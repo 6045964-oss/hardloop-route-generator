@@ -148,7 +148,7 @@ export async function installFakeOrs(context, calls = [], opts = {}) {
     }
     const body = JSON.parse(req.postData());
     const json = fakeRoute(body, opts);
-    calls.push({ body, distance: json.features[0].properties.summary.distance, stats: json.stats });
+    calls.push({ body, distance: json.features[0].properties.summary.distance, stats: json.stats, auth: req.headers().authorization || null });
     await route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(json) });
   });
   return calls;

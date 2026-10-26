@@ -17,7 +17,10 @@ PLAYWRIGHT_BROWSERS_PATH=/tmp/pw/browsers PW=/tmp/pw/node_modules/playwright/ind
 ```
 
 - Standaard gebruikt de test een **nep-ORS** (`fake-ors.mjs`): snel, gratis, voorspelbaar.
-- `--real` gebruikt de echte OpenRouteService met de sleutel uit `config.js`. Dat kost
+- `--real` gebruikt de echte OpenRouteService. Geef de sleutel mee als omgevingsvariabele
+  (nooit in een bestand in de repository): `HRG_ORS_KEY=… node tests/e2e.mjs --real`. Dat kost
   routeverzoeken (gratis plan: 2000 per dag, 40 per minuut); de test wacht zelf als de
   minuutlimiet in zicht komt.
+- De test "service worker" gebruikt altijd de echte ORS (een actieve service worker omzeilt
+  de nep-ORS). Zonder `HRG_ORS_KEY` slaat hij het route-deel over.
 - `--only=woord` draait alleen de tests waarvan de naam dat woord bevat.

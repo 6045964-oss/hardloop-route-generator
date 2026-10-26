@@ -9,7 +9,7 @@ Puur statische bestanden, geen server, geen account.
 | `index.html` | De app |
 | `style.css` | Vormgeving (licht/donker, mobiel-eerst) |
 | `app.js` | Kaart, route, live modus, spraak, geschiedenis |
-| `config.js` | **Hier komt je OpenRouteService API-sleutel** |
+| `config.js` | Instellingen (afwijkingsgrens). **Nooit een API-sleutel** |
 | `manifest.json` | PWA-gegevens (naam, icoon, standalone) |
 | `service-worker.js` | Offline cache voor de app en de kaarttegels |
 | `icons/` | App-iconen |
@@ -17,27 +17,15 @@ Puur statische bestanden, geen server, geen account.
 
 ---
 
-## 1. Gratis OpenRouteService-sleutel aanmaken
+## 1. Gratis OpenRouteService-sleutel (HeiGIT)
 
-1. Ga naar **https://openrouteservice.org/dev/#/signup** en maak een gratis account aan.
-2. Bevestig je e-mailadres via de link in de mail en log in.
-3. Je komt op je **Dashboard**. Kies bij *Request a token* het type **Standard**, vul een naam in (bijv. `hardlopen`) en klik op **CREATE TOKEN**.
-4. Kopieer de lange sleutel die verschijnt.
+1. Maak een gratis account op **https://account.heigit.org** en bevestig je e-mailadres.
+2. Log in en maak een **API-sleutel** aan voor openrouteservice.
+3. Open de app, tik rechtsboven op het **sleutel-icoon** en plak de sleutel daar.
 
-Het gratis plan is ruim genoeg voor persoonlijk gebruik (ongeveer 2.000 routes per dag, 40 per minuut).
+De sleutel wordt alleen op dat apparaat bewaard (in de opslag van de browser of de app op je beginscherm). Hij staat **niet** in de code en hoort daar ook nooit in: alles in deze repository staat openbaar op GitHub Pages. Heb je geen sleutel ingevuld, dan vraagt de app erom.
 
-### Sleutel invullen: kies één van twee manieren
-
-**A. In `config.js`** (makkelijk):
-```js
-window.HRG_CONFIG = {
-  ORS_API_KEY: 'plak-hier-je-sleutel',
-  OFF_ROUTE_METERS: 20,
-};
-```
-> Let op: op GitHub Pages is dit bestand openbaar leesbaar. Het risico is klein (iemand kan hooguit jouw gratis quotum gebruiken), maar weet het.
-
-**B. In de app zelf** (sleutel blijft privé): laat `config.js` leeg, open de app, tik rechtsboven op het **sleutel-icoon** en plak hem daar. Hij wordt alleen op je iPhone bewaard.
+Het gratis plan is ruim genoeg voor persoonlijk gebruik (2.000 routes per dag, 40 per minuut). Elke keer "Genereer route" kost maximaal 8 verzoeken.
 
 ---
 
@@ -108,7 +96,6 @@ Op de iPhone heeft het paneel onderin drie standen: **ingeklapt** (alleen afstan
 ## Instellingen
 
 In `config.js`:
-- `ORS_API_KEY`: je sleutel.
 - `OFF_ROUTE_METERS`: bij hoeveel meter afwijking je een waarschuwing krijgt (standaard 20). GPS op een telefoon is vaak 5–15 m nauwkeurig. Ga daarom niet veel lager dan 15.
 
 ## Lokaal testen

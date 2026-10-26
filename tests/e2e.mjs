@@ -45,17 +45,22 @@ const BASE = `http://localhost:${server.address().port}/`;
 // ---------------------------------------------------------------------------
 let failures = 0;
 let checks = 0;
+let skipped = 0;
 function check(ok, msg) {
   checks++;
   console.log(`  ${ok ? 'OK  ' : 'FOUT'} ${msg}`);
   if (!ok) failures++;
+}
+function skip(msg) {
+  skipped++;
+  console.log(`  OVERGESLAGEN ${msg}`);
 }
 
 const browser = await webkit.launch();
 const realCalls = []; // tijdstippen van echte ORS-verzoeken, om de minuutlimiet te respecteren
 
 // Nieuwe iPhone-context (verse localStorage) met nep-ORS, of echte ORS bij --real.
-async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL } = {}) {
+async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL, key = true } = {}) {
   const context = await browser.newContext({
     ...devices['iPhone 13'],
     ...(viewport ? { viewport } : {}),
@@ -70,9 +75,11 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   if (!realOrs) await installFakeOrs(context, calls, fake);
   await context.route(/tile\.openstreetmap\.org/, (r) => (realOrs ? r.continue()
     : r.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: TILE_PNG })));
-  if (realOrs && process.env.HRG_ORS_KEY) {
-    // Sleutel alleen voor deze test-browser, zoals de app hem op het apparaat bewaart.
-    await context.addInitScript((k) => { try { if (!localStorage.getItem('hrg.orsKey')) localStorage.setItem('hrg.orsKey', JSON.stringify(k)); } catch {} }, process.env.HRG_ORS_KEY);
+  // Sleutel alleen in deze test-browser, zoals de app hem op het apparaat bewaart: echt via
+  // HRG_ORS_KEY (nooit in de repository), bij de nep-ORS een nepsleutel.
+  const testKey = realOrs ? process.env.HRG_ORS_KEY : 'nep-sleutel-voor-tests';
+  if (key && testKey) {
+    await context.addInitScript((k) => { try { if (!localStorage.getItem('hrg.orsKey')) localStorage.setItem('hrg.orsKey', JSON.stringify(k)); } catch {} }, testKey);
   }
   const page = await context.newPage();
   const errors = [];
@@ -91,6 +98,12 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   await page.waitForFunction(() => document.getElementById('btnGenerate') && !document.getElementById('btnGenerate').disabled);
   await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
   return { context, page, calls, errors };
+}
+
+function hasRealKey(what) {
+  if (process.env.HRG_ORS_KEY) return true;
+  skip(`${what}: echte ORS nodig, geen HRG_ORS_KEY opgegeven`);
+  return false;
 }
 
 async function respectMinuteLimit(need = 8) {
@@ -195,6 +208,12 @@ test('basis: service worker, update-melding, route, kaarttegels', async () => {
   check(true, 'nieuwe versie zonder route in beeld: automatisch herladen');
   await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
 
+  if (!hasRealKey('route, kaarttegels en update-melding met route')) {
+    writeFileSync(swPath, sw);
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+    return;
+  }
   // Route van 5 km
   const r = await generate(page, 5);
   if (!r.entry) throw new Error(`geen route; melding: "${r.notice}"`);
@@ -635,6 +654,48 @@ test('afstand: beste poging bewaren, lange routes binnen 5%', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// v1.4.0 — 2: API-sleutel alleen op het apparaat
+// ---------------------------------------------------------------------------
+test('sleutel: niet in de code, app vraagt erom, alleen op het apparaat', async () => {
+  // Geen sleutel in de repository (alle bestanden die git volgt)
+  const { execFileSync } = await import('node:child_process');
+  const files = execFileSync('git', ['ls-files'], { cwd: PROJECT, encoding: 'utf8' }).split('\n').filter(Boolean);
+  const leaks = files.filter((f) => !/\.png$/.test(f) && /eyJ[A-Za-z0-9_\-+/=]{30,}/.test(readFileSync(join(PROJECT, f), 'utf8')));
+  check(leaks.length === 0, `geen sleutel in ${files.length} bestanden van de repository${leaks.length ? `: ${leaks.join(', ')}` : ''}`);
+  check(!/ORS_API_KEY\s*:/.test(readFileSync(join(PROJECT, 'config.js'), 'utf8')), 'config.js bevat geen sleutelveld');
+
+  const { context, page, calls, errors } = await openApp({ key: false });
+  page.on('dialog', (d) => d.accept());
+  const notice = () => page.$eval('#notice', (e) => (e.hidden ? '' : e.innerText.replace(/\s+/g, ' ')));
+  check(/API-sleutel nodig/i.test(await notice()), `bij opstarten zonder sleutel: "${(await notice()).slice(0, 90)}"`);
+  await page.evaluate(() => document.getElementById('btnGenerate').click());
+  await page.waitForTimeout(500);
+  check(/API-sleutel nodig/i.test(await notice()) && calls.length === 0, 'genereren zonder sleutel: melding, geen verzoek naar ORS');
+  // Toevoegen via de melding → venster → opslaan
+  await page.click('#noticeAction');
+  await page.waitForFunction(() => document.getElementById('keyDialog').open);
+  check(/account\.heigit\.org/.test(await page.$eval('#keyDialog', (e) => e.innerHTML)), 'venster verwijst naar account.heigit.org');
+  await page.fill('#keyInput', '  mijn-test-sleutel  ');
+  await page.click('#btnKeySave');
+  await page.waitForFunction(() => !document.getElementById('keyDialog').open);
+  check(await page.evaluate(() => JSON.parse(localStorage.getItem('hrg.orsKey'))) === 'mijn-test-sleutel', 'sleutel (zonder spaties) in localStorage van dit apparaat');
+  const r = await generate(page, 5);
+  check(r.entry && calls.length > 0 && calls.every((c) => c.auth === 'mijn-test-sleutel'), `route gemaakt; ${calls.length} verzoeken met de sleutel in de Authorization-header`);
+  await waitTiles(page);
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  check(!/API-sleutel nodig/i.test(await notice()), 'na herladen: sleutel onthouden, geen vraag meer');
+  // Wissen
+  await page.click('#btnKey');
+  await page.waitForFunction(() => document.getElementById('keyDialog').open);
+  await page.click('#btnKeyClear');
+  await page.click('#keyDialog [data-close]');
+  check(await page.evaluate(() => localStorage.getItem('hrg.orsKey')) === null, 'Wissen haalt de sleutel van het apparaat');
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
+
+// ---------------------------------------------------------------------------
 // Uitvoeren
 // ---------------------------------------------------------------------------
 try {
@@ -648,5 +709,5 @@ try {
   server.close();
   rmSync(ROOT, { recursive: true, force: true });
 }
-console.log(`\n${checks - failures}/${checks} controles geslaagd${REAL ? ` · ${realCalls.length} echte ORS-verzoeken` : ''}`);
+console.log(`\n${checks - failures}/${checks} controles geslaagd${skipped ? ` · ${skipped} overgeslagen` : ''}${realCalls.length ? ` · ${realCalls.length} echte ORS-verzoeken` : ''}`);
 process.exitCode = failures ? 1 : 0;
