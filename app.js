@@ -1561,34 +1561,59 @@
   // Scherm wakker houden (Screen Wake Lock API)
   // ---------------------------------------------------------------------------
   let wakeLock = null;
+  let wakeNoticeShown = false; // korte melding hooguit één keer per run
+  let wakeWanted = false;      // false zodra de navigatie stopt: dan niet opnieuw aanvragen
 
   const WAKE_FALLBACK = 'Zet zelf Instellingen › Beeldscherm en helderheid › Automatische vergrendeling op "Nooit" tijdens het lopen. Als het scherm op slot gaat, stopt de GPS en hoor je geen waarschuwingen.';
+  const wakeSupported = () => !!(navigator.wakeLock && typeof navigator.wakeLock.request === 'function');
 
   async function requestWakeLock() {
-    if (!('wakeLock' in navigator)) {
-      showWakeWarning(`Deze browser kan het scherm niet aan houden. ${WAKE_FALLBACK}`);
+    if (!state.run) return false;
+    wakeWanted = true;
+    if (!wakeSupported()) {
+      showWakeWarning(`Deze browser kan het scherm niet aan houden. ${WAKE_FALLBACK}`,
+        'Dit toestel houdt het scherm niet vanzelf aan. Zet automatische vergrendeling tijdelijk op "Nooit".');
       return false;
     }
+    if (wakeLock) return true;
     try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      const lock = await navigator.wakeLock.request('screen');
+      if (!state.run || !wakeWanted) { // intussen gestopt: meteen weer loslaten
+        lock.release().catch(() => {});
+        return false;
+      }
+      wakeLock = lock;
+      lock.addEventListener('release', () => {
+        if (wakeLock === lock) wakeLock = null;
+        // Losgelaten terwijl de app zichtbaar is (bijv. energiebesparing): opnieuw proberen.
+        if (wakeWanted && state.run && document.visibilityState === 'visible') setTimeout(requestWakeLock, 1000);
+      });
       els.wakeWarn.hidden = true;
       return true;
     } catch (err) {
       wakeLock = null;
-      showWakeWarning(`Het scherm aan houden lukte niet${err && err.name ? ` (${err.name})` : ''}. ${WAKE_FALLBACK}`);
+      showWakeWarning(`Het scherm aan houden lukte niet${err && err.name ? ` (${err.name})` : ''}. ${WAKE_FALLBACK}`,
+        'Het scherm aan houden lukte niet. Zet automatische vergrendeling tijdelijk op "Nooit".');
       return false;
     }
   }
 
-  function showWakeWarning(text) {
+  // Uitgebreide uitleg in het paneel; een korte melding bovenaan, want tijdens het lopen
+  // is het paneel meestal ingeklapt.
+  function showWakeWarning(text, short) {
     els.wakeWarn.textContent = text;
     els.wakeWarn.hidden = false;
+    if (!wakeNoticeShown && state.run) {
+      wakeNoticeShown = true;
+      showNotice('warn', 'Scherm blijft niet aan', short, { autoHide: 9000 });
+    }
   }
 
   async function releaseWakeLock() {
-    try { if (wakeLock) await wakeLock.release(); } catch { /* al vrijgegeven */ }
+    const lock = wakeLock;
+    wakeWanted = false; // eerst: een 'release'-event mag niet opnieuw aanvragen
     wakeLock = null;
+    try { if (lock) await lock.release(); } catch { /* al vrijgegeven */ }
   }
 
   // Wake lock vervalt als de app naar de achtergrond gaat: opnieuw aanvragen bij terugkomst.
@@ -1725,6 +1750,7 @@
     }
 
     hideNotice();
+    wakeNoticeShown = false;
     const run = {
       startedAt: Date.now(),
       elapsed: 0,

@@ -60,7 +60,7 @@ const browser = await webkit.launch();
 const realCalls = []; // tijdstippen van echte ORS-verzoeken, om de minuutlimiet te respecteren
 
 // Nieuwe iPhone-context (verse localStorage) met nep-ORS, of echte ORS bij --real.
-async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL, key = true } = {}) {
+async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL, key = true, wakeLock = null, fakeGps = false } = {}) {
   const context = await browser.newContext({
     ...devices['iPhone 13'],
     ...(viewport ? { viewport } : {}),
@@ -81,6 +81,8 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   if (key && testKey) {
     await context.addInitScript((k) => { try { if (!localStorage.getItem('hrg.orsKey')) localStorage.setItem('hrg.orsKey', JSON.stringify(k)); } catch {} }, testKey);
   }
+  if (wakeLock) await context.addInitScript(WAKE_STUB, wakeLock);
+  if (fakeGps) await context.addInitScript(GPS_STUB, STARTS[start]);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => { if (!/Context is stopped/.test(e.message)) errors.push(`pageerror: ${e.message}`); });
@@ -177,6 +179,47 @@ async function choose(page, prefId, value) {
 }
 
 const pct = (x) => `${Math.round(x * 100)}%`;
+
+// Nagebootste Screen Wake Lock API ('stub' = werkt, 'none' = niet ondersteund, 'reject' = geweigerd)
+// en zichtbaarheid (window.__vis), met tellers in window.__wl.
+function WAKE_STUB(mode) {
+  window.__vis = 'visible';
+  Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get() { return window.__vis; } });
+  Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get() { return window.__vis !== 'visible'; } });
+  window.__wl = { requests: 0, releases: 0, active: 0 };
+  const api = mode === 'none' ? undefined : {
+    async request(type) {
+      window.__wl.requests++;
+      if (mode === 'reject') throw new DOMException('Niet toegestaan', 'NotAllowedError');
+      const s = new EventTarget();
+      s.type = type; s.released = false;
+      s.release = async () => {
+        if (s.released) return;
+        s.released = true; window.__wl.active--; window.__wl.releases++;
+        s.dispatchEvent(new Event('release'));
+      };
+      window.__wl.active++; window.__wlLast = s;
+      return s;
+    },
+  };
+  Object.defineProperty(Navigator.prototype, 'wakeLock', { configurable: true, get() { return api; } });
+}
+
+// Nagebootste GPS: window.__gpsMove(lat, lng, nauwkeurigheid) stuurt een positie naar de app.
+function GPS_STUB(startPos) {
+  const watchers = new Map();
+  let id = 0;
+  let pos = { lat: startPos.latitude, lng: startPos.longitude, acc: 6 };
+  const make = () => ({ coords: { latitude: pos.lat, longitude: pos.lng, accuracy: pos.acc, altitude: null, heading: null, speed: null }, timestamp: Date.now() });
+  const geo = {
+    getCurrentPosition(ok) { setTimeout(() => ok(make()), 30); },
+    watchPosition(ok) { id++; watchers.set(id, ok); setTimeout(() => ok(make()), 30); return id; },
+    clearWatch(w) { watchers.delete(w); },
+  };
+  Object.defineProperty(Navigator.prototype, 'geolocation', { configurable: true, get() { return geo; } });
+  window.__gpsMove = (lat, lng, acc = 5) => { pos = { lat, lng, acc }; watchers.forEach((cb) => cb(make())); };
+  window.__gpsWatchers = () => watchers.size;
+}
 
 // 1×1 png voor nep-tegels (geen verkeer naar OSM bij nep-tests)
 const TILE_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
@@ -693,6 +736,58 @@ test('sleutel: niet in de code, app vraagt erom, alleen op het apparaat', async 
   check(await page.evaluate(() => localStorage.getItem('hrg.orsKey')) === null, 'Wissen haalt de sleutel van het apparaat');
   check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
   await context.close();
+});
+
+// ---------------------------------------------------------------------------
+// v1.4.0 — 3: scherm aan houden (Screen Wake Lock API)
+// ---------------------------------------------------------------------------
+test('scherm aan: wake lock tijdens navigatie', async () => {
+  const startRun = async (page) => {
+    await generate(page, 5);
+    await page.evaluate(() => document.getElementById('btnStart').click());
+    await page.waitForFunction(() => document.body.classList.contains('is-running'));
+    await page.waitForTimeout(300);
+  };
+  const wl = (page) => page.evaluate(() => ({ ...window.__wl }));
+  {
+    const { context, page, errors } = await openApp({ wakeLock: 'stub' });
+    page.on('dialog', (d) => d.accept());
+    await startRun(page);
+    let w = await wl(page);
+    check(w.requests === 1 && w.active === 1, `navigatie gestart: lock aangevraagd (${w.requests}×, ${w.active} actief)`);
+    // Naar de achtergrond: systeem laat los; niet opnieuw zolang verborgen
+    await page.evaluate(() => { window.__vis = 'hidden'; window.__wlLast.release(); document.dispatchEvent(new Event('visibilitychange')); });
+    await page.waitForTimeout(1500);
+    w = await wl(page);
+    check(w.requests === 1 && w.active === 0, `app verborgen: losgelaten, niet opnieuw aangevraagd (${w.requests}×)`);
+    await page.evaluate(() => { window.__vis = 'visible'; document.dispatchEvent(new Event('visibilitychange')); });
+    await page.waitForTimeout(300);
+    w = await wl(page);
+    check(w.requests === 2 && w.active === 1, `weer zichtbaar: opnieuw aangevraagd (${w.requests}×, ${w.active} actief)`);
+    // Systeem laat los terwijl de app zichtbaar is → na ~1 s opnieuw
+    await page.evaluate(() => window.__wlLast.release());
+    await page.waitForTimeout(1500);
+    w = await wl(page);
+    check(w.requests === 3 && w.active === 1, `losgelaten door het systeem terwijl zichtbaar: opnieuw aangevraagd (${w.requests}×)`);
+    await page.evaluate(() => document.getElementById('btnStop').click());
+    await page.waitForFunction(() => !document.body.classList.contains('is-running'));
+    await page.waitForTimeout(1500);
+    w = await wl(page);
+    check(w.active === 0 && w.requests === 3, `navigatie gestopt: losgelaten en niet opnieuw aangevraagd (${w.releases}× losgelaten)`);
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+  }
+  for (const mode of ['none', 'reject']) {
+    const { context, page, errors } = await openApp({ wakeLock: mode });
+    page.on('dialog', (d) => d.accept());
+    await startRun(page);
+    const n = await page.$eval('#notice', (e) => (e.hidden ? '' : e.innerText.replace(/\s+/g, ' ')));
+    const visible = await page.$eval('#notice', (e) => { const r = e.getBoundingClientRect(); return !e.hidden && r.top >= 0 && r.bottom <= innerHeight; });
+    check(/scherm blijft niet aan/i.test(n) && visible, `${mode === 'none' ? 'niet ondersteund' : 'geweigerd'}: korte melding zichtbaar bij ingeklapt paneel: "${n.slice(0, 100)}"`);
+    check(await page.$eval('#wakeWarn', (e) => !e.hidden && /Automatische vergrendeling/.test(e.textContent)), `${mode}: uitgebreide uitleg in het paneel`);
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
