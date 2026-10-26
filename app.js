@@ -807,16 +807,23 @@
   // ORS wijkt per afstand anders af, dus alleen metingen van vergelijkbare lengte tellen
   // (gewicht valt weg met de log-verhouding). Gewogen gemiddelde van de metingen rond de
   // gewogen mediaan: uitschieters (een rare vorm) tellen niet mee, en het springt minder.
-  // Elke strategie (round trip, via-punt) heeft een eigen geheugen (storeKey).
-  function predictLengthRatio(meters, storeKey = KEYS.lengthObs, prior = 1.05) {
+  // Elke strategie (round trip, via-punt) heeft een eigen geheugen (storeKey). ORS wijkt ook
+  // per plek anders af (gemeten: Alphen ~18% langer, Utrecht ~0%), dus metingen uit dezelfde
+  // omgeving (`at`, binnen ~15 km) wegen zwaarder.
+  function predictLengthRatio(meters, storeKey = KEYS.lengthObs, prior = 1.05, at = null) {
     const obs = store.get(storeKey, []);
     const items = [{ r: prior, w: 0.5 }]; // zwakke startwaarde zolang er weinig metingen zijn
     if (Array.isArray(obs)) {
-      obs.forEach(([m, r], i) => {
+      obs.forEach(([m, r, la, ln], i) => {
         if (!(m > 0 && r > 0)) return;
         const d = Math.log(meters / m);
         const recency = 0.5 + (0.5 * (i + 1)) / obs.length;
-        items.push({ r, w: Math.exp(-(d * d) / (2 * 0.25 * 0.25)) * recency });
+        let near = 0.5; // oude metingen zonder plek
+        if (at && Number.isFinite(la) && Number.isFinite(ln)) {
+          const km = haversine(at, [la / 100, ln / 100]) / 1000;
+          near = 0.15 + 0.85 * Math.exp(-((km / 15) ** 2));
+        }
+        items.push({ r, w: Math.exp(-(d * d) / (2 * 0.25 * 0.25)) * recency * near });
       });
     }
     items.sort((a, b) => a.r - b.r);
@@ -833,10 +840,13 @@
     return clamp(mean, 0.7, 1.6);
   }
 
-  function rememberLength(distance, asked, storeKey = KEYS.lengthObs) {
+  // Opslag per meting: [routelengte m, verhouding, lat×100, lng×100] (plek op ~1 km nauwkeurig).
+  function rememberLength(distance, asked, storeKey = KEYS.lengthObs, at = null) {
     const obs = store.get(storeKey, []);
     const list = Array.isArray(obs) ? obs : [];
-    list.push([Math.round(distance), Math.round((distance / asked) * 1000) / 1000]);
+    const entry = [Math.round(distance), Math.round((distance / asked) * 1000) / 1000];
+    if (at) entry.push(Math.round(at[0] * 100), Math.round(at[1] * 100));
+    list.push(entry);
     store.set(storeKey, list.slice(-LENGTH_OBS_LIMIT));
   }
 
@@ -896,8 +906,7 @@
   function betterCandidate(a, b, target) {
     if (!b) return true;
     if (a.within5 !== b.within5) return a.within5;
-    if (!a.within5) { // allebei te kort of te lang: eerst niet dubbel, dan het dichtst bij
-      if (a.clean !== b.clean) return a.clean;
+    if (!a.within5) { // allebei te kort of te lang: de dichtstbijzijnde wint (dubbel lopen telt mee als afwijking)
       return a.dev + a.overlap * 3 < b.dev + b.overlap * 3;
     }
     if (a.clean !== b.clean) return a.clean;
@@ -914,6 +923,7 @@
     const [minAsked, maxAsked] = strategy.askedRange(ctx);
     let seed = newSeed();
     let tries = []; // { asked, got } met de huidige seed (zelfde vorm)
+    const seenRatios = []; // got/asked van alle vormen in deze zoektocht (zelfde plek en afstand)
     let best = null;
     let lastErr = null;
     let attemptsMade = 0;
@@ -931,7 +941,12 @@
         const q = tries[n - 1];
         return q.asked * (target / q.got);
       }
-      return target / predictLengthRatio(target, strategy.ratioKey, strategy.ratioPrior);
+      // Nieuwe vorm: het geheugen, bijgestuurd met wat deze zoektocht al gezien heeft.
+      const model = predictLengthRatio(target, strategy.ratioKey, strategy.ratioPrior, ctx.start);
+      if (!seenRatios.length) return target / model;
+      const sorted = seenRatios.slice().sort((x, y) => x - y);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      return target / ((seenRatios.length * median + model) / (seenRatios.length + 1));
     };
     const switchSeed = () => {
       seed = newSeed();
@@ -956,8 +971,9 @@
       }
 
       // Leren hoe ORS de lengte "opvat", per afstand: volgende routes starten dichterbij.
-      rememberLength(cand.distance, asked, strategy.ratioKey);
+      rememberLength(cand.distance, asked, strategy.ratioKey, ctx.start);
       tries.push({ asked, got: cand.distance });
+      seenRatios.push(cand.distance / asked);
 
       cand.seed = seed;
       cand.attempts = attempt;

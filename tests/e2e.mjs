@@ -70,11 +70,23 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   if (!realOrs) await installFakeOrs(context, calls, fake);
   await context.route(/tile\.openstreetmap\.org/, (r) => (realOrs ? r.continue()
     : r.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: TILE_PNG })));
+  if (realOrs && process.env.HRG_ORS_KEY) {
+    // Sleutel alleen voor deze test-browser, zoals de app hem op het apparaat bewaart.
+    await context.addInitScript((k) => { try { if (!localStorage.getItem('hrg.orsKey')) localStorage.setItem('hrg.orsKey', JSON.stringify(k)); } catch {} }, process.env.HRG_ORS_KEY);
+  }
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => { if (!/Context is stopped/.test(e.message)) errors.push(`pageerror: ${e.message}`); });
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console.error: ${m.text()}`); });
-  page.on('request', (r) => { if (realOrs && r.url().includes('/directions/') && r.method() === 'POST') { realCalls.push(Date.now()); calls.push({ real: true }); } });
+  page.on('request', (r) => { if (realOrs && r.url().includes('/directions/') && r.method() === 'POST') realCalls.push(Date.now()); });
+  page.on('response', async (r) => { // echte ORS: gevraagde en geleverde lengte per poging bijhouden
+    if (!realOrs || !r.url().includes('/directions/') || r.request().method() !== 'POST') return;
+    let asked = null;
+    let distance = null;
+    try { asked = JSON.parse(r.request().postData()).options?.round_trip?.length ?? null; } catch {}
+    try { distance = (await r.json()).features[0].properties.summary.distance; } catch {}
+    calls.push({ real: true, status: r.status(), asked, distance });
+  });
   await page.goto(BASE);
   await page.waitForFunction(() => document.getElementById('btnGenerate') && !document.getElementById('btnGenerate').disabled);
   await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
@@ -185,7 +197,8 @@ test('basis: service worker, update-melding, route, kaarttegels', async () => {
 
   // Route van 5 km
   const r = await generate(page, 5);
-  check(r.entry && Math.abs(r.entry.distance - 5000) <= 250, `route 5 km → ${(r.entry.distance / 1000).toFixed(2)} km (${calls.length} echte verzoeken)`);
+  if (!r.entry) throw new Error(`geen route; melding: "${r.notice}"`);
+  check(Math.abs(r.entry.distance - 5000) <= 250, `route 5 km → ${(r.entry.distance / 1000).toFixed(2)} km (${calls.length} echte verzoeken)`);
   check(await page.evaluate(() => document.querySelectorAll('.leaflet-overlay-pane path').length > 0), 'route op de kaart');
   await page.waitForFunction(() => /klaar|opgeslagen|mislukt/i.test(document.getElementById('tileText').textContent), null, { timeout: 90000 });
   const tiles = await page.evaluate(() => caches.open('hrg-tiles-v1').then((c) => c.keys()).then((k) => k.length));
@@ -585,6 +598,41 @@ test('functie 9: paneel inklappen (iPhone)', async () => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// v1.4.0 — 1: afstand bij lange routes
+// ---------------------------------------------------------------------------
+test('afstand: beste poging bewaren, lange routes binnen 5%', async () => {
+  if (!REAL) {
+    // Nep-ORS maakt alles 2,2× te lang: geen poging haalt 5%, dus de dichtstbijzijnde moet winnen.
+    const { context, page, calls, errors } = await openApp({ fake: { scale: 2.2 } });
+    const r = await generate(page, 15);
+    const closest = calls.reduce((a, c) => (Math.abs(c.distance - 15000) < Math.abs(a.distance - 15000) ? c : a));
+    const last = calls[calls.length - 1];
+    check(Math.abs(r.entry.distance - closest.distance) < 0.01,
+      `bewaard: ${(r.entry.distance / 1000).toFixed(2)} km = dichtstbijzijnde van ${calls.length} pogingen (laatste was ${(last.distance / 1000).toFixed(2)} km)`);
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+    return;
+  }
+  const rows = [];
+  const starts = (process.env.HRG_STARTS || 'utrecht,alphen').split(',');
+  for (const start of starts) {
+    const { context, page, calls, errors } = await openApp({ start });
+    for (const km of [5, 10, 15, 20]) {
+      const n0 = calls.length;
+      const r = await generate(page, km);
+      const dev = ((r.entry.distance - km * 1000) / (km * 1000)) * 100;
+      rows.push({ start, km, got: r.entry.distance / 1000, dev, overlap: r.entry.overlap });
+      const tries = calls.slice(n0).map((c) => `${((c.asked || 0) / 1000).toFixed(1)}→${c.distance ? (c.distance / 1000).toFixed(1) : c.status}`).join(' ');
+      check(Math.abs(dev) <= 5, `${start.padEnd(7)} ${String(km).padStart(2)} km → ${(r.entry.distance / 1000).toFixed(2)} km (${dev >= 0 ? '+' : ''}${dev.toFixed(1)}%), dubbel ${r.entry.overlap} m  [${tries}]`);
+    }
+    check(errors.length === 0, `${start}: geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+  }
+  const worst = Math.max(...rows.map((x) => Math.abs(x.dev)));
+  console.log(`  · grootste afwijking ${worst.toFixed(1)}%, gemiddeld ${(rows.reduce((a, x) => a + Math.abs(x.dev), 0) / rows.length).toFixed(1)}%`);
+});
 
 // ---------------------------------------------------------------------------
 // Uitvoeren
