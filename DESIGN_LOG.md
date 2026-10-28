@@ -280,3 +280,115 @@ Een functie die als niet-gecommitte wijziging wordt aangetroffen (bijv. uit een 
 verdient dezelfde behandeling als een nieuwe: een echte testloop vóór het vertrouwen, niet alleen
 code lezen — ook als de code bij lezen al correct lijkt. Hier bleek de code zelf in orde; de
 testopzet had twee keer bijstelling nodig voordat hij de juiste dingen controleerde.
+
+## Sessie 9 — 2026-10-28: routes plannen op OSM-data (Overpass) i.p.v. achteraf scoren (v1.4.0)
+
+### Aanleiding
+Voorkeuren (Platteland, Weinig bochten, Drukke wegen) scoorden tot nu toe alleen ná ontvangst
+van een blind `round_trip`-rondje van ORS (Voorkeuren 1–3, Sessie 7): ze konden nooit sturen
+wélke wegen gekozen werden. Concrete klacht: Platteland aan gaf in Alphen aan den Rijn een rondje
+door de woonwijk terwijl de polder ernaast lag.
+
+### Nieuwe aanpak
+1. Eén Overpass-aanvraag (wegen + landuse/natuur-vlakken) rond het startpunt, straal
+   `clamp(afstand × 0,45, 500, 9000 m)` — bewust begrensd: bij lange afstanden "ziet" het plan
+   alleen het nabije deel, de rest blijft aan ORS's eigen keuze over.
+2. Een graaf van kruispunten uit die wegen (`buildRoadGraph`): een knoop is een kruispunt zodra
+   meer dan één weg hem aandoet, of hij het eind van een weg is (mogelijk doodlopend).
+3. Richting kiezen: de cirkel rond de start in 8 sectoren, elke sector een lengte-gewogen score
+   met dezelfde prioriteit/gewichten als Voorkeuren 1–3 (rustige wegen 8, platteland 2, bochten
+   1) — en een duidelijke kwaliteitsfilter: zodra er ≥ 2 goede richtingen gevonden zijn, worden
+   duidelijk zwakkere richtingen (< 60% van de beste score) niet meer meegenomen. Zonder die
+   filter verdunt een `seed % richtingen.length`-keuze de sturing fors (gemeten in een test met
+   een scherp oost/west-verschil: 62% i.p.v. 85%+ in de juiste richting).
+4. Tussenpunten: vanaf de start in die richting een kruispunt zoeken op zo'n 35% van de gevraagde
+   afstand (`walkFrom`, nooit een doodlopend pad in), dat wordt het via-punt; plus één tussenpunt
+   per boog (heen/terug) zodat beide over verschillende wegen gaan — net als bij Functie 8
+   (via-punt), maar hier zelf op basis van wegkwaliteit gekozen i.p.v. de dichtstbijzijnde weg.
+5. Pas dán een ORS-verzoek, met die tussenpunten (`continue_straight`, geen `round_trip`).
+   Dubbel lopen gevonden → via `cand.legBounds` het tussenpunt vinden dat dat been begrenst en
+   dat ene punt weghalen, dezelfde vorm opnieuw proberen (nieuw: `findRoute()`'s lus kreeg hiervoor
+   één `strategy.repair()`-aftakking, vlak vóór de bestaande `switchSeed()`).
+6. Niets hiervan actief (geen relevante voorkeur, of een zelfgekozen via-punt) → geen Overpass-
+   aanvraag, de bestaande `roundTripStrategy` ongewijzigd. Mislukt Overpass (onbereikbaar, te
+   weinig data, geen bruikbare richting) → stille terugval op dezelfde `roundTripStrategy`.
+
+### Niet als `registerFeature()`-blok
+Moet vóór alle voorkeuren al de strategie kiezen, combineert er meerdere tegelijk, en is zelf
+asynchroon (Overpass) terwijl `prepare()` dat niet is — bewuste afwijking van het "één blok per
+functie"-patroon (zie Sessie 7); wél als één aaneengesloten, duidelijk afgebakende sectie vlak
+vóór `findRoute`. Om dezelfde reden met opzet geen gedeelde code met Voorkeur 1–3 (gewichten) of
+Functie 8 (ellips-wiskunde, uiteindelijk niet eens meer gebruikt, zie hieronder): hier
+gedupliceerd i.p.v. gehaald uit hun blok, zodat die blokken en deze sectie elk nog steeds los met
+`git revert` terug te draaien zijn.
+
+### OSM blijvend bewaren (op verzoek tijdens de bouw)
+Overpass-data per (op ~110 m / 250 m afgerond) gebied in IndexedDB, ververst na hooguit een
+maand — alles in try/catch, werkt de opslag niet dan wordt gewoon elke keer opnieuw opgehaald.
+Mislukt een verse aanvraag maar is er nog een verouderde cache, dan die gebruiken in plaats van
+meteen terug te vallen op een ongestuurde round trip.
+
+### Twee echte bugs gevonden door het ook echt te draaien, niet alleen te lezen
+- **Lengtecorrectie convergeerde niet; een rondje bleef na 3 pogingen 57% te lang.** Oorzaak: het
+  via-punt werd bij elke poging opnieuw gekozen op basis van de bijgestelde `asked`-afstand — een
+  kruispunt kiezen is een discrete stap door de graaf, dus een iets andere `asked` kon op een heel
+  ander kruispunt uitkomen. De secant-bijstelling in `findRoute()` neemt aan dat dezelfde seed
+  dezelfde vórm oplevert, alleen geschaald (waar is bij `round_trip` en bij Functie 8's vaste
+  via-punt) — hier was dat niet meer zo.
+  **Eerste oplossing (verkeerd):** het via-punt per seed vastzetten en alléén de zijwaartse
+  tussenpunten laten meeschalen met `asked`. Loste de non-convergentie op, maar onthulde een
+  tweede fout (zie hieronder): met een vast via-punt op basis van 50% van de gevraagde afstand
+  kwam de totale lengte structureel 50–90% te hoog uit, met geen manier om dat alsnog bij te
+  stellen.
+  **Werkelijke oorzaak:** een rondje "naar een punt op de halve gevraagde afstand en terug" is al
+  net zo lang als de hele gevraagde afstand (heen + terug = 2 × helft) — de twee extra
+  zijwaartse tussenpunten (nodig zodat heen en terug niet over dezelfde weg gaan, zoals Functie 8
+  ook doet) komen daar nog bovenop. Opgelost door het via-punt op ~35% van de gevraagde afstand te
+  zoeken (niet 50%), met budget voor de tussenpunten (elk tot ~12% van de bijgestelde afstand,
+  rechtstreeks `asked`-afhankelijk zodat de correctie wél grip houdt). De eerder gebruikte
+  ellips-breedte-wiskunde van Functie 8 loste dit dubbele-budgettering-probleem niet op en is
+  verwijderd i.p.v. hergebruikt.
+- **Rekenfout in de testopzet zelf, niet in de app:** `tests/fake-overpass.mjs` destructureerde de
+  bbox uit de Overpass-querytekst met zowel `.slice(1)` als een overslaande komma in hetzelfde
+  patroon (`[, zuid, west, noord, oost] = match.slice(1).map(Number)`), waardoor alle vier de
+  waarden één plek opschoven en `oost` op `undefined` uitkwam. Gevolg: `NaN`/`null`-coördinaten in
+  het nep-wegennet, en `buildRoadGraph` crashte daarop (`p.lon.toFixed` op `null`) — opgevangen
+  door `planRouteContext`'s eigen terugval, dus zichtbaar als "voorkeur aan, maar toch een gewone
+  round trip", niet als een harde fout. Gevonden door expliciet te loggen wat er binnenkwam i.p.v.
+  aan te nemen dat de bbox-parsing wel klopte.
+
+### Geverifieerd (nep-Overpass, `tests/e2e.mjs`)
+- Geen relevante voorkeur actief, of een zelfgekozen via-punt: geen Overpass-aanvraag, gewone
+  round trip — de bestaande, veelgebruikte situatie blijft ongewijzigd en even snel.
+- Platteland/Weinig bochten aan: wél een Overpass-aanvraag, en een verzoek met tussenpunten
+  (`continue_straight`, geen `round_trip`).
+- Op een nep-rasternetje met een duidelijk rustige/landelijke en een drukke/bebouwde helft leunen
+  de gekozen tussenpunten een duidelijke meerderheid (bij een kwart van de pogingen niet, door het
+  rechthoekige rasternetje zelf — zie hieronder) naar de juiste kant.
+- Een zelfgekozen via-punt gaat voor; geen Overpass-aanvraag ook niet met Platteland/Weinig
+  bochten aan.
+
+### Wat NIET geverifieerd kon worden, en waarom
+Beide publieke Overpass-servers (overpass-api.de, overpass.kumi.systems) weigerden elk verzoek
+vanuit deze ontwikkelomgeving (406 resp. permanente time-out), terwijl gewoon internet daar prima
+werkte (openrouteservice.org, api.heigit.org, nominatim.openstreetmap.org allemaal bereikbaar) —
+vrijwel zeker Overpass' eigen anti-misbruikbescherming tegen verkeer uit datacenters, niet een
+sandboxbeperking. Een echte iPhone op een gewone verbinding heeft dit probleem niet, maar het
+betekent wel:
+- De gevraagde Alphen aan den Rijn-tabel (5/10/15 km × Platteland/Weinig bochten aan/uit) kon hier
+  niet met echte cijfers ingevuld worden. `tests/field-check.mjs` staat klaar om dat te doen —
+  draai het vanaf een gewone internetverbinding met `HRG_ORS_KEY`.
+- Of de eis "≥ 60% platteland"/"≥ 40% minder bochten/km" op een echt wegennet gehaald wordt, is nog
+  niet gemeten — het nep-rasternetje bevestigt dat er gestuurd wordt, niet hoe sterk.
+- De 15-seconden-doelstelling is evenmin met echte tijden gemeten; een Overpass-aanvraag plus tot
+  8 ORS-aanvragen kan op een trage verbinding realistisch over 15 s heen gaan, vergelijkbaar met
+  hoe `findRoute()` ook vandaag al geen harde tijdslimiet kent, alleen een pogingenlimiet.
+
+### Ideeën voor later
+- `tests/field-check.mjs` eenmalig draaien (buiten deze omgeving) en de 35%/12%-budgettering
+  bijstellen aan de hand van echte cijfers, zoals het geleerde-lengtemodel dat al voor
+  `round_trip`/Functie 8 doet.
+- `repair()` is nu vrij grof (altijd het eerste interieurpunt van het slechtste been); zou
+  preciezer kunnen door meerdere kandidaten te proberen in plaats van er blind één te kiezen.
+- Gebouwvlakken (niet alleen landuse-vlakken) zouden de platteland/bebouwd-inschatting
+  preciezer kunnen maken, tegen hogere Overpass-queryomvang.

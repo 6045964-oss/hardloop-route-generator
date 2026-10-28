@@ -726,7 +726,13 @@
     Object.entries(props.extras || {}).forEach(([kind, v]) => {
       if (v && Array.isArray(v.values)) extras[kind] = v.values;
     });
-    return { coords, distance, steps, extras, ascent: props.ascent, descent: props.descent };
+    // Cumulatieve afstand per "been" (stuk tussen twee opeenvolgende waypoints in het verzoek).
+    // Alleen gebruikt door planStrategy's repair() om een dubbel-lopend stuk aan het
+    // veroorzakende tussenpunt te koppelen; voor round_trip/via (1 been) een onschuldig array.
+    const legBounds = [];
+    let legAcc = 0;
+    (props.segments || []).forEach((s) => { legAcc += s.distance || 0; legBounds.push(legAcc); });
+    return { coords, distance, steps, extras, ascent: props.ascent, descent: props.descent, legBounds };
   }
 
   function cumulativeMeters(coords) {
@@ -758,7 +764,7 @@
   // of er vlak naast). Kruisingen tellen niet mee: alleen (anti)parallelle stukken.
   // Rond start/finish mag het (je eigen straat uit en weer in), en rond freePoints ook
   // (bijv. een zelfgekozen via-punt aan het eind van een doodlopend pad).
-  function measureOverlap(coords, freePoints = []) {
+  function measureOverlap(coords, freePoints = [], { detail = false } = {}) {
     const geo = prepareGeo(coords);
     const { pts, cum, total } = geo;
     const STEP = 10;
@@ -800,7 +806,11 @@
       }
     }
     // Twee keer over hetzelfde stuk = twee rakende samples; /2 geeft de lengte van het stuk.
-    return (hit.reduce((n, h) => n + h, 0) * STEP) / 2;
+    const meters = (hit.reduce((n, h) => n + h, 0) * STEP) / 2;
+    if (!detail) return meters;
+    const positions = [];
+    for (let i = 0; i < hit.length; i++) if (hit[i]) positions.push(samples[i].a);
+    return { meters, positions };
   }
 
   function lengthTolerance(target) {
@@ -986,6 +996,11 @@
       const lengthOk = cand.dev <= tolerance;
       if (cand.clean && lengthOk && cand.hardOk && cand.softOk) return { ...cand, ok: true };
 
+      // Dubbel lopen: als de strategie weet welk tussenpunt dat veroorzaakt (planStrategy),
+      // dat ene punt verschuiven/weghalen en met dezelfde vorm opnieuw proberen, vóór een
+      // heel andere seed te proberen.
+      if (!cand.clean && strategy.repair && strategy.repair(ctx, cand)) continue;
+
       // Andere vorm als de vorm het probleem is (dubbel, eis of voorkeur niet gehaald bij een
       // goede lengte), of als bijstellen met deze vorm niet convergeert.
       if (!cand.clean || !cand.hardOk || lengthOk || tries.length >= MAX_SAME_SEED) switchSeed();
@@ -995,6 +1010,450 @@
         'Er kon geen rondje gevonden worden vanaf dit startpunt. Probeer een ander startpunt of een andere afstand.', { retry: true });
     }
     return { ...best, attempts: attemptsMade, ok: best.clean && best.dev <= tolerance && best.hardOk };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Route plannen op basis van OSM-data (Overpass), vóórdat ORS iets gevraagd wordt
+  // ---------------------------------------------------------------------------
+  // De oude aanpak vraagt een willekeurig round-trip-rondje aan en scoort pas ná ontvangst
+  // of het bij de voorkeuren past (Voorkeuren 1–3 hierboven): voorkeuren konden zo nooit sturen
+  // wélke wegen gekozen worden. Hier wordt eerst de omgeving bekeken (Overpass), dan een
+  // richting gekozen die bij de actieve voorkeuren past, en dan tussenpunten gelegd op echte
+  // kruispunten in die richting — pas dán gaat er een ORS-verzoek uit, met die tussenpunten.
+  //
+  // Geen `registerFeature()`-blok zoals de voorkeuren hierboven: dit moet vóór alle
+  // `prepare()`-haken de strategie al kiezen, combineert meerdere voorkeuren tegelijk, en is
+  // zelf asynchroon (Overpass-aanvraag) terwijl `prepare()` dat niet is. Bewuste afwijking van
+  // het "één blok per functie, los terug te draaien"-patroon (zie DESIGN_LOG Sessie 9) — daarom
+  // wel als één aaneengesloten, duidelijk afgebakende sectie, met opzet vlak bij `findRoute`.
+  // Om diezelfde reden ook geen gedeelde code met Voorkeur 1–3 (gewichten) of Functie 8
+  // (ellips-wiskunde): hier gedupliceerd i.p.v. gehaald uit hun blok, zodat die blokken (en
+  // deze sectie) elk nog steeds los met `git revert` terug te draaien zijn.
+  const OSM_PRIMARY_URL = 'https://overpass-api.de/api/interpreter';
+  const OSM_MIRROR_URL = 'https://overpass.kumi.systems/api/interpreter';
+  const OSM_FETCH_TIMEOUT_MS = 6000;
+  const OSM_MIN_WAYS = 15;          // minder wegdata dan dit: te weinig om op te plannen
+  const OSM_RADIUS_MIN = 500;
+  const OSM_RADIUS_MAX = 9000;      // begrensd: bij lange afstanden "ziet" het plan alleen het nabije deel
+  const OSM_DB_NAME = 'hrg-osm-v1';
+  const OSM_DB_STORE = 'areas';
+  const OSM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // ververs hooguit eens per maand; meestal dezelfde plek
+  const OSM_RURAL_HIGHWAY = new Set(['track', 'path', 'bridleway']);
+  const OSM_QUIET_HIGHWAY = new Set(['residential', 'living_street', 'service', 'track', 'path', 'footway', 'cycleway', 'pedestrian']);
+  const OSM_BUSY_HIGHWAY = new Set(['primary', 'secondary', 'primary_link', 'secondary_link']);
+  const OSM_RURAL_LANDUSE = new Set(['farmland', 'meadow', 'orchard', 'vineyard']);
+  const OSM_RURAL_NATURAL = new Set(['wood', 'scrub', 'heath', 'grassland', 'wetland']);
+  const OSM_BUILT_LANDUSE = new Set(['residential', 'industrial', 'retail', 'commercial']);
+  // Zelfde prioriteit/gewicht als QUIET_WEIGHT/RURAL_WEIGHT/TURNS_WEIGHT bij Voorkeur 1–3
+  // hierboven; hier gedupliceerd (zie uitleg boven deze sectie).
+  const PLAN_WEIGHT = { quiet: 8, rural: 2, turns: 1 };
+  const PLAN_SECTORS = 8;
+  const PLAN_RATIO_KEY = 'hrg.lengthObs.plan.v1';
+  const PLAN_RATIO_PRIOR = 1.15;    // tussenpunten op echte kruispunten: minder "opslag" nodig dan via (1.35)
+
+  // ---- IndexedDB: OSM-data blijvend per (afgerond) gebied, zodat herhaald starten vanaf
+  //      dezelfde plek niet elke keer opnieuw bij Overpass hoeft aan te kloppen. ----
+  function openOsmDb() {
+    return new Promise((resolve, reject) => {
+      if (!('indexedDB' in window)) { reject(new Error('geen IndexedDB')); return; }
+      let req;
+      try { req = indexedDB.open(OSM_DB_NAME, 1); } catch (e) { reject(e); return; }
+      req.onupgradeneeded = () => { try { req.result.createObjectStore(OSM_DB_STORE, { keyPath: 'key' }); } catch { /* bestaat al */ } };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function osmDbGet(key) {
+    try {
+      const db = await openOsmDb();
+      return await new Promise((resolve) => {
+        const req = db.transaction(OSM_DB_STORE, 'readonly').objectStore(OSM_DB_STORE).get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch { return null; } // geen IndexedDB (privénavigatie, oude browser, …): gewoon niet bewaren
+  }
+  async function osmDbPut(entry) {
+    try {
+      const db = await openOsmDb();
+      await new Promise((resolve) => {
+        const tx = db.transaction(OSM_DB_STORE, 'readwrite');
+        tx.objectStore(OSM_DB_STORE).put(entry);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch { /* opslag niet gelukt: volgende keer wordt gewoon opnieuw opgehaald */ }
+  }
+
+  function osmCacheKey(start, radius) {
+    // ~110 m nauwkeurig (3 decimalen) en radius in stappen van 250 m: genoeg om "dezelfde plek,
+    // ongeveer dezelfde afstand" te hergebruiken zonder voor elke kleine afwijking opnieuw te vragen.
+    return `${Math.round(start[0] * 1000) / 1000},${Math.round(start[1] * 1000) / 1000},${Math.round(radius / 250) * 250}`;
+  }
+
+  function overpassQueryBody(start, radius) {
+    const [lat, lng] = start;
+    const dLat = radius / 111320;
+    const dLng = radius / (111320 * Math.cos((lat * Math.PI) / 180) || 1);
+    const bbox = `${(lat - dLat).toFixed(6)},${(lng - dLng).toFixed(6)},${(lat + dLat).toFixed(6)},${(lng + dLng).toFixed(6)}`;
+    return `[out:json][timeout:25];`
+      + `(way["highway"]["highway"!~"^(motorway|trunk|motorway_link|trunk_link|proposed|construction|abandoned)$"](${bbox}););`
+      + `out geom;`
+      + `(way["landuse"~"^(farmland|meadow|orchard|vineyard|residential|industrial|retail|commercial)$"](${bbox});`
+      + `way["natural"~"^(wood|scrub|heath|grassland|wetland)$"](${bbox});`
+      + `way["leisure"~"^(park|nature_reserve)$"](${bbox}););`
+      + `out geom;`;
+  }
+
+  async function overpassFetch(url, body) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OSM_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(body)}`,
+      });
+      if (!res.ok) throw new Error(`overpass ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchOsmRaw(start, radius) {
+    const body = overpassQueryBody(start, radius);
+    let json;
+    try {
+      json = await overpassFetch(OSM_PRIMARY_URL, body);
+    } catch (e1) {
+      json = await overpassFetch(OSM_MIRROR_URL, body); // lukt dit ook niet, dan gaat de fout omhoog
+    }
+    const elements = json.elements || [];
+    const ways = elements.filter((el) => el.type === 'way' && el.tags && el.tags.highway && Array.isArray(el.geometry) && el.geometry.length > 1);
+    const rural = elements.filter((el) => el.type === 'way' && el.tags && Array.isArray(el.geometry) && el.geometry.length > 2
+      && (OSM_RURAL_LANDUSE.has(el.tags.landuse) || OSM_RURAL_NATURAL.has(el.tags.natural) || el.tags.leisure === 'nature_reserve'));
+    const built = elements.filter((el) => el.type === 'way' && el.tags && Array.isArray(el.geometry) && el.geometry.length > 2
+      && OSM_BUILT_LANDUSE.has(el.tags.landuse));
+    if (ways.length < OSM_MIN_WAYS) throw new Error('te weinig OSM-wegdata in dit gebied');
+    return { ways, rural, built };
+  }
+
+  const osmMemCache = new Map(); // ontdubbelt gelijktijdige aanvragen binnen deze sessie
+
+  async function fetchOsmContext(start, radius) {
+    const key = osmCacheKey(start, radius);
+    if (osmMemCache.has(key)) return osmMemCache.get(key);
+    const promise = (async () => {
+      const cached = await osmDbGet(key);
+      if (cached && Date.now() - cached.fetchedAt < OSM_TTL_MS) {
+        return { ways: cached.ways, rural: cached.rural, built: cached.built, graph: buildRoadGraph(cached.ways) };
+      }
+      try {
+        const fresh = await fetchOsmRaw(start, radius);
+        osmDbPut({ key, lat: start[0], lng: start[1], radius, fetchedAt: Date.now(), ...fresh }); // achtergrond; niet afwachten
+        return { ...fresh, graph: buildRoadGraph(fresh.ways) };
+      } catch (err) {
+        if (cached) return { ways: cached.ways, rural: cached.rural, built: cached.built, graph: buildRoadGraph(cached.ways) }; // verouderd, beter dan niets
+        throw err;
+      }
+    })();
+    osmMemCache.set(key, promise);
+    promise.catch(() => osmMemCache.delete(key));
+    return promise;
+  }
+
+  // ---- Graaf van kruispunten uit de ruwe OSM-wegen: een knoop wordt een "kruispunt" zodra
+  //      meer dan één weg hem aandoet, of hij het eind van een weg is (mogelijk doodlopend). ----
+  function buildRoadGraph(ways) {
+    const keyOf = (p) => `${p.lat.toFixed(6)},${p.lon.toFixed(6)}`;
+    const refs = new Map();
+    ways.forEach((w) => {
+      const seen = new Set();
+      w.geometry.forEach((p) => {
+        const k = keyOf(p);
+        if (!seen.has(k)) { refs.set(k, (refs.get(k) || 0) + 1); seen.add(k); }
+      });
+    });
+    const vertices = new Map();
+    let vid = 0;
+    const vertexAt = (p) => {
+      const k = keyOf(p);
+      let v = vertices.get(k);
+      if (!v) { v = { id: vid++, lat: p.lat, lon: p.lon, edges: [] }; vertices.set(k, v); }
+      return v;
+    };
+    const edges = [];
+    ways.forEach((w) => {
+      const geom = w.geometry;
+      let from = 0;
+      for (let i = 1; i < geom.length; i++) {
+        const isJunction = (refs.get(keyOf(geom[i])) || 0) > 1 || i === geom.length - 1;
+        if (!isJunction) continue;
+        const a = vertexAt(geom[from]);
+        const b = vertexAt(geom[i]);
+        const span = geom.slice(from, i + 1);
+        let lengthM = 0;
+        for (let j = 1; j < span.length; j++) lengthM += haversine([span[j - 1].lat, span[j - 1].lon], [span[j].lat, span[j].lon]);
+        if (lengthM > 0.5 && a.id !== b.id) {
+          const straight = haversine([a.lat, a.lon], [b.lat, b.lon]) / lengthM;
+          const edge = { a, b, lengthM, straight: clamp(straight, 0, 1), tags: w.tags };
+          edges.push(edge);
+          a.edges.push(edge);
+          b.edges.push(edge);
+        }
+        from = i;
+      }
+    });
+    return { vertices: [...vertices.values()], edges };
+  }
+
+  // Ray-casting point-in-polygon; op deze schaal (een paar km) is lat/lon als plat vlak prima.
+  function pointInPolygon(lat, lon, geom) {
+    let inside = false;
+    for (let i = 0, j = geom.length - 1; i < geom.length; j = i++) {
+      const yi = geom[i].lat, xi = geom[i].lon, yj = geom[j].lat, xj = geom[j].lon;
+      if (((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function inAnyPolygon(lat, lon, ways) {
+    return ways.some((w) => pointInPolygon(lat, lon, w.geometry));
+  }
+
+  // Score 0–1 voor één randje van de graaf (hoger = beter voor de actieve voorkeuren).
+  // Geen enkele voorkeur actief → neutrale 0,5 (richting maakt dan niet uit).
+  function planEdgeScore(edge, active, osm) {
+    let s = 0, w = 0;
+    if (active.rural) {
+      const mid = { lat: (edge.a.lat + edge.b.lat) / 2, lon: (edge.a.lon + edge.b.lon) / 2 };
+      const rural = OSM_RURAL_HIGHWAY.has(edge.tags.highway) || inAnyPolygon(mid.lat, mid.lon, osm.rural);
+      const built = inAnyPolygon(mid.lat, mid.lon, osm.built);
+      s += (rural && !built ? 1 : 0) * PLAN_WEIGHT.rural; w += PLAN_WEIGHT.rural;
+    }
+    if (active.turns) { s += edge.straight * PLAN_WEIGHT.turns; w += PLAN_WEIGHT.turns; }
+    if (active.quiet) {
+      const busy = OSM_BUSY_HIGHWAY.has(edge.tags.highway);
+      const quiet = OSM_QUIET_HIGHWAY.has(edge.tags.highway);
+      s += (busy ? 0 : quiet ? 1 : 0.6) * PLAN_WEIGHT.quiet; w += PLAN_WEIGHT.quiet;
+    }
+    return w > 0 ? s / w : 0.5;
+  }
+
+  // Richting kiezen: de cirkel rond het startpunt in 8 sectoren verdelen, elke sector een
+  // lengte-gewogen score geven, en aflopend sorteren. Sectoren zonder genoeg wegdata vervallen.
+  function scoreDirections(osm, start, radius, active) {
+    const sums = new Array(PLAN_SECTORS).fill(0);
+    const weights = new Array(PLAN_SECTORS).fill(0);
+    const step = 360 / PLAN_SECTORS;
+    osm.graph.edges.forEach((e) => {
+      const mid = [(e.a.lat + e.b.lat) / 2, (e.a.lon + e.b.lon) / 2];
+      if (haversine(start, mid) > radius) return;
+      const sec = Math.floor((((bearing(start, mid) % 360) + 360) % 360) / step) % PLAN_SECTORS;
+      sums[sec] += planEdgeScore(e, active, osm) * e.lengthM;
+      weights[sec] += e.lengthM;
+    });
+    return sums
+      .map((s, i) => ({ deg: (i + 0.5) * step, score: weights[i] > 0 ? s / weights[i] : -1, coverage: weights[i] }))
+      .filter((d) => d.coverage > 150) // te weinig weg in deze sector om op te plannen
+      .sort((a, b) => b.score - a.score);
+  }
+
+  function nearestVertex(graph, latlng) {
+    let best = null, bestD = Infinity;
+    graph.vertices.forEach((v) => {
+      const d = haversine(latlng, [v.lat, v.lon]);
+      if (d < bestD) { bestD = d; best = v; }
+    });
+    return best;
+  }
+
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s |= 0; s = (s + 0x6D2B79F5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Vanaf een kruispunt een stuk ver lopen in ongeveer `bearingDeg`: bij elk kruispunt de
+  // uitgaande weg kiezen die het best bij de gevraagde richting én de actieve voorkeuren past,
+  // en nooit een doodlopend pad in (tenzij bijna op de gevraagde afstand: dan mag het laatste
+  // stukje wel een doodlopend eind zijn, zodat er niet nodeloos vroeg wordt afgebroken).
+  function walkFrom(graph, startVertex, bearingDeg, targetM, active, osm, seed) {
+    let v = startVertex;
+    let prevId = null;
+    let along = 0;
+    const rand = mulberry32(seed);
+    for (let guard = 0; guard < 400 && along < targetM; guard++) {
+      const options = v.edges.filter((e) => {
+        const other = e.a.id === v.id ? e.b : e.a;
+        if (other.id === prevId) return false;
+        return other.edges.length >= 2 || along + e.lengthM >= targetM * 0.9;
+      });
+      if (!options.length) break;
+      let best = null, bestScore = -Infinity;
+      options.forEach((e) => {
+        const other = e.a.id === v.id ? e.b : e.a;
+        const want = bearing([v.lat, v.lon], [other.lat, other.lon]);
+        const diff = Math.min(Math.abs(want - bearingDeg), 360 - Math.abs(want - bearingDeg));
+        const headingScore = 1 - diff / 180;
+        const score = headingScore * 0.6 + planEdgeScore(e, active, osm) * 0.4 + rand() * 0.05;
+        if (score > bestScore) { bestScore = score; best = { edge: e, other }; }
+      });
+      prevId = v.id;
+      v = best.other;
+      along += best.edge.lengthM;
+    }
+    return { vertex: v, along };
+  }
+
+  // Tussenpunten voor de hele lus: een synthetisch via-punt op een kruispunt in de beste
+  // richting (ongeveer halverwege de gevraagde omtrek), plus per boog (heen/terug) één
+  // tussenpunt op een kruispunt dat zelf ook goed scoort — zodat niet alleen het verre punt,
+  // maar ook de weg ernaartoe bij de voorkeuren past.
+  // Het via-punt (en de kruispunten waar het pad vandaan komt) kiezen is een discrete stap
+  // door de graaf: een paar meter meer of minder gevraagde afstand kan op een heel ander
+  // kruispunt uitkomen, niet een lichtjes verschoven versie van hetzelfde punt. Daarom wordt
+  // dit maar één keer per seed gedaan (op de gevraagde afstand `ctx.target`, niet het
+  // steeds bijgestelde `asked`) en voor de lengtecorrectie-pogingen daarna hergebruikt —
+  // anders springt de vorm bij elke poging en kan de secant-bijstelling in findRoute() nooit
+  // convergeren (gemeten: een rondje dat na 3 pogingen nog 57% te lang was in plaats van te
+  // convergeren naar de gevraagde afstand).
+  function pickPlanAnchor(ctx, bearingDeg, seed) {
+    const startV = nearestVertex(ctx.graph, ctx.start);
+    if (!startV) return null;
+    // Niet tot de helft van de gevraagde afstand lopen: start→via→start alléén is al zo
+    // lang als de weg-omtrek van die driehoek (meestal ruim meer dan de rechte afstand ×2,
+    // door bochten in het wegennet). Tot ~35% lopen laat ruimte over voor de twee
+    // tussenpunten hieronder, die er zelf ook nog wat afstand bij optellen.
+    const half = walkFrom(ctx.graph, startV, bearingDeg, ctx.target * 0.35, ctx.activePrefs, ctx.osm, seed);
+    if (half.along < ctx.target * 0.12) return null; // amper vooruitgekomen: deze richting werkt hier niet
+    return { startV, viaV: half.vertex, via: [half.vertex.lat, half.vertex.lon], bearingDeg, seed };
+  }
+
+  // Tussenpunten rond een vastgezet anker: het via-punt blijft gelijk, alleen hoever de
+  // tussenpunten op de heen- en terugweg opzij lopen (`legTarget`) schaalt mee met `asked` —
+  // dát is wat de lengtecorrectie van findRoute() daadwerkelijk kan bijsturen.
+  function buildPlanWaypoints(ctx, anchor, asked) {
+    const side = anchor.seed % 2 ? 1 : -1;
+    const legTarget = clamp(asked * 0.12, 120, 1500);
+    const out1 = walkFrom(ctx.graph, anchor.startV, (anchor.bearingDeg + 35 * side + 360) % 360, legTarget, ctx.activePrefs, ctx.osm, anchor.seed + 101);
+    const back1 = walkFrom(ctx.graph, anchor.viaV, (anchor.bearingDeg + 180 - 35 * side + 360) % 360, legTarget, ctx.activePrefs, ctx.osm, anchor.seed + 202);
+
+    const pts = [{ ll: ctx.start, role: 'start' }];
+    if (out1.along > 80 && out1.vertex.id !== anchor.startV.id) pts.push({ ll: [out1.vertex.lat, out1.vertex.lon], role: 'out1' });
+    pts.push({ ll: anchor.via, role: 'via' });
+    if (back1.along > 80 && back1.vertex.id !== anchor.viaV.id) pts.push({ ll: [back1.vertex.lat, back1.vertex.lon], role: 'back1' });
+    pts.push({ ll: ctx.start, role: 'finish' });
+    return pts;
+  }
+
+  // Eén keer het anker kiezen én meteen de lus bouwen; gebruikt door planRouteContext() om
+  // vooraf te checken of een richting hier überhaupt een bruikbaar rondje oplevert.
+  function walkWaypoints(ctx, bearingDeg, perimeter, seed) {
+    const anchor = pickPlanAnchor(ctx, bearingDeg, seed);
+    return anchor ? buildPlanWaypoints(ctx, anchor, perimeter) : null;
+  }
+
+  const planStrategy = {
+    ratioKey: PLAN_RATIO_KEY,
+    ratioPrior: PLAN_RATIO_PRIOR,
+    askedRange: (ctx) => [ctx.target * 0.85, ctx.target * 1.25],
+    body(ctx, asked, seed) {
+      let wps = ctx.forcedWaypoints;
+      ctx.forcedWaypoints = null; // eenmalig: alleen gezet door repair() voor de eerstvolgende poging
+      if (!wps) {
+        if (!ctx.planAnchor || ctx.planAnchorSeed !== seed) {
+          const dirIdx = seed % ctx.directions.length;
+          const jitter = ((seed % 11) - 5) * 4;
+          ctx.planAnchor = pickPlanAnchor(ctx, (ctx.directions[dirIdx].deg + jitter + 360) % 360, seed);
+          ctx.planAnchorSeed = seed;
+        }
+        wps = ctx.planAnchor ? buildPlanWaypoints(ctx, ctx.planAnchor, asked) : null;
+      }
+      if (!wps) wps = [{ ll: ctx.start, role: 'start' }, { ll: ctx.start, role: 'finish' }]; // kan hier niet meer gebeuren (richtingen zijn al gevalideerd), maar nooit crashen
+      ctx.lastWaypoints = wps;
+      // Rond elk tussenpunt mag de route elkaar raken zonder dat als "dubbel lopen" telt
+      // (net als bij Functie 8's via-punt): dat is hier een bewust keerpunt, geen omweg.
+      ctx.overlapFree = wps.filter((p) => p.role !== 'start' && p.role !== 'finish').map((p) => p.ll);
+      return {
+        coordinates: wps.map((p) => [p.ll[1], p.ll[0]]),
+        radiuses: wps.map((_, i) => (i === 0 || i === wps.length - 1 ? 350 : -1)),
+        continue_straight: true,
+      };
+    },
+    // Dubbel lopen gevonden: via cand.legBounds het "been" (stuk tussen twee tussenpunten)
+    // vinden waar dat gebeurt, en één van de twee tussenpunten die dat been begrenzen
+    // weghalen (nooit start/finish, liever niet het via-punt zelf: dat bepaalt de richting).
+    repair(ctx, cand) {
+      const wps = ctx.lastWaypoints;
+      if (!wps || wps.length <= 3) return false; // niets meer om weg te halen zonder het via-punt te raken
+      const overlap = measureOverlap(cand.coords, ctx.overlapFree, { detail: true });
+      if (!overlap.positions.length || !cand.legBounds || !cand.legBounds.length) return false;
+      const legOf = (a) => {
+        for (let i = 0; i < cand.legBounds.length; i++) if (a <= cand.legBounds[i]) return i;
+        return cand.legBounds.length - 1;
+      };
+      const legHits = new Map();
+      overlap.positions.forEach((a) => { const l = legOf(a); legHits.set(l, (legHits.get(l) || 0) + 1); });
+      const worstLeg = [...legHits.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      // been i ligt tussen tussenpunt i en i+1 in `wps`; kies het interieur-punt dat eraan grenst.
+      const candidates = [worstLeg, worstLeg + 1].filter((i) => i > 0 && i < wps.length - 1 && wps[i].role !== 'via');
+      if (!candidates.length) return false;
+      const drop = candidates[0];
+      ctx.forcedWaypoints = wps.filter((_, i) => i !== drop);
+      return true;
+    },
+  };
+
+  // Overpass ophalen, richting kiezen en vast een werkende tussenpunten-vorm valideren vóór
+  // er ook maar één ORS-verzoek uitgaat. Geeft niets terug (zet ctx.strategy zelf): mislukt
+  // het ergens (geen relevante voorkeur, geen internet/Overpass, geen bruikbare richting), dan
+  // blijft `ctx.strategy` gewoon de bestaande `roundTripStrategy` — stille terugval, geen melding.
+  async function planRouteContext(ctx, setLabel) {
+    const active = {
+      rural: !!prefs.rural,
+      turns: !!prefs.fewTurns,
+      quiet: !!prefs.quiet,
+    };
+    if (!active.rural && !active.turns && !active.quiet) return; // niets te sturen: gewone round trip
+    if (Array.isArray(prefs.via)) return; // een zelfgekozen via-punt gaat voor (Functie 8 kiest dan zelf de strategie)
+
+    try {
+      setLabel('Omgeving bekijken…');
+      const radius = clamp(ctx.target * 0.45, OSM_RADIUS_MIN, OSM_RADIUS_MAX);
+      const osm = await fetchOsmContext(ctx.start, radius);
+
+      setLabel('Richting kiezen…');
+      const ranked = scoreDirections(osm, ctx.start, radius, active);
+      const planCtx = { ...ctx, graph: osm.graph, osm, activePrefs: active };
+      const bestScore = ranked.length ? ranked[0].score : 0;
+      const valid = [];
+      for (const dir of ranked) {
+        if (valid.length >= 6) break;
+        // Genoeg goede richtingen voor variatie bij "Andere route"? Dan een duidelijk
+        // zwakkere richting niet meer meenemen — anders verwatert de 50/50-kans van
+        // seed % directions.length de sturing juist weer (bv. 62% i.p.v. 85%+ oostwaarts
+        // in een test met een duidelijk oost/west-verschil).
+        if (valid.length >= 2 && dir.score < bestScore * 0.6) continue;
+        if (walkWaypoints(planCtx, dir.deg, ctx.target, 1)) valid.push(dir);
+      }
+      if (!valid.length) return; // nergens in de buurt een bruikbare richting: gewone round trip
+
+      ctx.strategy = planStrategy;
+      ctx.graph = osm.graph;
+      ctx.osm = osm;
+      ctx.activePrefs = active;
+      ctx.directions = valid;
+    } catch (err) {
+      // Overpass onbereikbaar, te weinig data, of iets anders onverwachts: nooit de gebruiker
+      // blokkeren op iets wat de kaart niet per se nodig heeft — gewoon de gewone round trip.
+      console.warn('Route plannen op OSM-data mislukt, terugval op round trip:', err && err.message);
+    }
   }
 
   function setBusy(btn, busy, label) {
@@ -1026,14 +1485,6 @@
     const start = state.start.latlng;
     const target = want.meters;
     const ctx = { start, target, strategy: roundTripStrategy, overlapFree: [] };
-    try {
-      // Functies kunnen hier de strategie kiezen of vooraf weigeren (bijv. via-punt te ver weg).
-      features.forEach((f) => f.active && f.active() && f.prepare && f.prepare(ctx));
-    } catch (err) {
-      if (!(err instanceof AppError)) throw err;
-      showNotice('warn', err.title, err.message);
-      return;
-    }
 
     const again = !!state.route;
     const btn = again ? els.btnAgain : els.btnGenerate;
@@ -1043,6 +1494,24 @@
     els.btnStart.disabled = true;
     hideNotice();
     emit('generate-start');
+
+    // Vóór de voorkeuren-haken hieronder: op OSM-data plannen als dat voor de actieve
+    // voorkeuren iets oplevert (zie planRouteContext). Mislukt dat (geen relevante voorkeur,
+    // geen internet/Overpass, geen bruikbare richting), dan blijft ctx.strategy de gewone
+    // round trip — stil, geen melding; de gebruiker krijgt gewoon een rondje.
+    await planRouteContext(ctx, (label) => { btn.querySelector('.btn__label').textContent = label; });
+
+    try {
+      // Functies kunnen hier de strategie kiezen of vooraf weigeren (bijv. via-punt te ver weg).
+      features.forEach((f) => f.active && f.active() && f.prepare && f.prepare(ctx));
+    } catch (err) {
+      if (!(err instanceof AppError)) throw err;
+      state.generating = false;
+      setBusy(btn, false, oldLabel);
+      els.btnStart.disabled = false;
+      showNotice('warn', err.title, err.message);
+      return;
+    }
 
     try {
       const found = await findRoute(ctx, key, (n, max) => {
