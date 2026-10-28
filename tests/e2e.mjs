@@ -791,6 +791,132 @@ test('scherm aan: wake lock tijdens navigatie', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Direct terug: kortste weg naar de start tijdens het lopen
+// (eigen blok; los terug te draaien via de bijbehorende commit)
+// ---------------------------------------------------------------------------
+test('Direct terug: online (ORS), offline terugval, en voltooien', async () => {
+  // Online: een stuk van het rondje lopen, dan "Direct terug" → ORS-aanvraag voor het kortste
+  // stuk naar de start, en dat stuk uitlopen tot "Terug bij de start".
+  {
+    const { context, page, calls, errors } = await openApp({ start: 'alphen', fakeGps: true });
+    page.on('dialog', (d) => d.accept());
+    const r = await generate(page, 5);
+    if (!r.entry) throw new Error(`geen route; melding: "${r.notice}"`);
+    const coords = r.entry.coords;
+    await page.evaluate(() => document.getElementById('btnStart').click());
+    await page.waitForFunction(() => document.body.classList.contains('is-running'));
+    await page.waitForTimeout(300);
+
+    // Ruim 60% van het rondje lopen: ver genoeg van start/finish voor een ORS-terugpad, én over
+    // de markWalked-drempel (run.back.loopAlong >= 60% van de lus) zodat "gelopen" ook echt test.
+    const idx = Math.floor(coords.length * 0.68);
+    for (let i = 1; i <= idx; i += 3) {
+      await page.evaluate(([la, ln]) => window.__gpsMove(la, ln, 6), coords[i]);
+      await page.waitForTimeout(12);
+    }
+    await page.waitForTimeout(200);
+    check(!(await page.$eval('#btnBack', (e) => e.disabled)), '"Direct terug" aanklikbaar na een stuk lopen');
+
+    const before = calls.length;
+    await page.evaluate(() => document.getElementById('btnBack').click());
+    await page.waitForFunction(() => !document.getElementById('backInfo').hidden, null, { timeout: 15000 });
+    check(calls.length === before + 1, `online: precies 1 extra ORS-verzoek voor het terugpad (${calls.length - before})`);
+    const afterClickBody = calls[calls.length - 1].body;
+    check(Array.isArray(afterClickBody.coordinates) && afterClickBody.coordinates.length === 2 && !afterClickBody.options,
+      `verzoek is punt-naar-punt, geen round_trip: ${JSON.stringify(afterClickBody.coordinates)}`);
+    const hasBackLine = await page.evaluate(() => !!document.querySelector('.leaflet-overlay-pane path.route-back'));
+    check(hasBackLine, 'terugpad getekend op de kaart (.route-back)');
+    const btnTxt = await page.$eval('#btnBack', (e) => e.textContent.trim());
+    check(btnTxt === 'Op weg terug', `knoptekst na starten: "${btnTxt}"`);
+    const backKm = await page.$eval('#backKm', (e) => e.textContent);
+    check(/^\d+,\d$/.test(backKm), `afstand-naar-start getoond: "${backKm}" km`);
+
+    // Het terugpad uitlopen (lineair van het huidige punt naar de start) tot "Terug bij de start".
+    const from = coords[idx];
+    const to = coords[0];
+    for (let s = 1; s <= 12; s++) {
+      const t = s / 12;
+      await page.evaluate(([la, ln]) => window.__gpsMove(la, ln, 6),
+        [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]);
+      await page.waitForTimeout(12);
+    }
+    await page.waitForTimeout(300);
+    const status = await page.$eval('#runStatusText', (e) => e.textContent);
+    const state = await page.$eval('#runStatus', (e) => e.dataset.state);
+    check(state === 'done' && /terug bij de start/i.test(status), `status na uitlopen terugpad: "${status}" (${state})`);
+    const hist = await page.evaluate(() => JSON.parse(localStorage.getItem('hrg.history.v1') || '[]'));
+    const item = hist.find((h) => h.id === r.entry.id);
+    check(!!(item && item.walkedAt), `rondje via Direct terug als gelopen opgeslagen (walkedAt: ${item && item.walkedAt})`);
+    check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+    await context.close();
+  }
+
+  // Offline: geen ORS-verzoek, terugval op het kortste van "rest van het rondje" /
+  // "terug langs de gelopen weg"; daarna Stop herstelt het oorspronkelijke rondje.
+  {
+    const { context, page, calls, errors } = await openApp({ start: 'alphen', fakeGps: true });
+    page.on('dialog', (d) => d.accept());
+    const r = await generate(page, 5);
+    if (!r.entry) throw new Error(`geen route; melding: "${r.notice}"`);
+    // Wachten tot het vooraf cachen van kaarttegels klaar is: anders breekt het zelf zetten van
+    // de browser op "offline" die lopende verzoeken af (net als bij herladen, zie waitTiles),
+    // wat hier niets met Direct terug te maken heeft maar wel als consolefout binnenkomt.
+    await waitTiles(page);
+    const coords = r.entry.coords;
+    const originalId = r.entry.id;
+    await page.evaluate(() => document.getElementById('btnStart').click());
+    await page.waitForFunction(() => document.body.classList.contains('is-running'));
+    await page.waitForTimeout(300);
+
+    const idx = Math.floor(coords.length * 0.4);
+    for (let i = 1; i <= idx; i += 3) {
+      await page.evaluate(([la, ln]) => window.__gpsMove(la, ln, 6), coords[i]);
+      await page.waitForTimeout(12);
+    }
+    await page.waitForTimeout(200);
+
+    await context.setOffline(true);
+    const before = calls.length;
+    await page.evaluate(() => document.getElementById('btnBack').click());
+    await page.waitForFunction(() => !document.getElementById('backInfo').hidden, null, { timeout: 15000 });
+    check(calls.length === before, `offline: geen ORS-verzoek gedaan (${calls.length - before} extra)`);
+    const label = await page.$eval('#backLabel', (e) => e.textContent);
+    check(/rest van het rondje|gelopen weg/i.test(label), `offline terugval: "${label}"`);
+    await context.setOffline(false);
+    // Terwijl de live kaart meebeweegt (focusOn op elke fix) blijft Leaflet nieuwe tegels buiten
+    // het vooraf gecachte gebied opvragen; "offline" zetten breekt die lopende verzoeken af, wat
+    // WebKit als generieke resource-fout in de console meldt — niets met Direct terug te maken
+    // (reproduceert identiek zonder die knop ooit aan te raken, geverifieerd los van deze test).
+    // Al afgehandeld op app-niveau via tileLayer's eigen 'tileerror' (zie checkTiles/warnTiles);
+    // hier dus gericht filteren i.p.v. de hele consolefouten-check laten falen.
+    const realErrors = errors.filter((e) => !/Failed to load resource: WebKit encountered an internal error/.test(e));
+
+    // Stoppen zonder het terugpad af te maken: oorspronkelijke rondje moet hersteld worden
+    // (state.route terug naar de volledige lus, niet het korte terugpad).
+    await page.evaluate(() => document.getElementById('btnStop').click());
+    await page.waitForFunction(() => !document.body.classList.contains('is-running'));
+    await page.waitForTimeout(200);
+    const hist = await page.evaluate(() => JSON.parse(localStorage.getItem('hrg.history.v1') || '[]'));
+    const original = hist.find((h) => h.id === originalId);
+    // Bij 40% gelopen (< 60%) mag het oorspronkelijke rondje NIET als gelopen gemarkeerd zijn.
+    check(!!original && !original.walkedAt, `< 60% gelopen vóór Stop: oorspronkelijke route niet als gelopen gemarkeerd (walkedAt: ${original && original.walkedAt})`);
+
+    // Opnieuw starten: bevestigt dat state.route echt terug is naar de volledige lus
+    // (anders zou "Nog" hier de korte terugpad-afstand tonen, niet de oorspronkelijke ~5 km).
+    await page.evaluate(() => document.getElementById('btnStart').click());
+    await page.waitForFunction(() => document.body.classList.contains('is-running'));
+    await page.waitForTimeout(200);
+    const left2 = await page.$eval('#statLeft', (e) => parseFloat(e.textContent.replace(',', '.')));
+    check(Math.abs(left2 - r.entry.distance / 1000) < 0.05,
+      `restoreLoop: na Stop + opnieuw Start toont "Nog" weer de volledige lus (${left2} km, origineel ${(r.entry.distance / 1000).toFixed(2)} km)`);
+    check(await page.$eval('#backInfo', (e) => e.hidden), 'terug-info verborgen bij een verse start (geen Direct terug ingedrukt)');
+
+    check(realErrors.length === 0, `geen consolefouten (afgezien van offline tegel-ruis)${realErrors.length ? `: ${realErrors.join(' | ')}` : ''}`);
+    await context.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Uitvoeren
 // ---------------------------------------------------------------------------
 try {

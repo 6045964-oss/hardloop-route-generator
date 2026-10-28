@@ -151,6 +151,10 @@
       <!-- LIVE -->
       <div class="run" id="runView" hidden>
         <h2 class="visually-hidden">Live hardlopen</h2>
+        <div class="back-info" id="backInfo" hidden aria-live="polite">
+          <p class="back-info__label" id="backLabel">Terug naar de start</p>
+          <p class="back-info__value"><span id="backKm">0,0</span><small>km</small> <span class="back-info__sep" aria-hidden="true">·</span> ~<span id="backMin">0</span><small>min</small></p>
+        </div>
         <div class="nav">
           <span class="nav__icon" id="navIcon" data-kind="turn" aria-hidden="true">
             <svg class="nav__svg nav__svg--turn" viewBox="0 0 24 24"><path d="M12 21V5M5.5 11.5 12 5l6.5 6.5"/></svg>
@@ -175,7 +179,10 @@
         <p class="run__warn" id="wakeWarn" hidden></p>
         <p class="run__warn" id="speechWarn" hidden></p>
         <p class="run__tip">Zet het geluid aan en de stille modus uit, anders hoor je niets.</p>
-        <button type="button" class="btn btn--stop" id="btnStop">Stop</button>
+        <div class="btn-row btn-row--run">
+          <button type="button" class="btn btn--back" id="btnBack">Direct terug</button>
+          <button type="button" class="btn btn--stop" id="btnStop">Stop</button>
+        </div>
       </div>
     </section>
   </main>

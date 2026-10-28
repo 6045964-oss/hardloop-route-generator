@@ -241,3 +241,42 @@ genegeerd, en route niet opnieuw ingepast na het verdwijnen van de adresbalk.
 CustomEvents tussen losse blokken, `inert` op verborgen paneelinhoud, pointer capture met
 snelheid-snapping, `role="switch"`-checkboxes en radiogroepen, Ramanujan-ellipsomtrek met
 bisectie, Playwright-route-onderschepping als nep-ORS.
+
+## Sessie 8 — 2026-10-28: Direct terug (kortste weg naar de start tijdens het lopen)
+
+### Wat het doet
+Knop naast Stop tijdens het lopen: kortste weg van je huidige positie terug naar de start.
+Online via een los ORS-verzoek (twee punten, geen round_trip); offline het kortste van twee uit
+de al bekende geometrie: de rest van het rondje verder uitlopen, of terugkeren langs het stuk dat
+je al gelopen hebt (`offlineBack`/`onlineBack`/`navRoute` in app.js). Het oorspronkelijke rondje
+blijft gedimd zichtbaar; bij "Stop" (of het uitlopen van het terugpad) wordt het hersteld.
+
+### Gevonden tijdens testen (dit keer: code al geschreven vóór het testen, niet in losse commits
+per functie zoals Sessie 7 — de wijzigingen stonden al niet-gecommit in de werkmap)
+- Geen correctheidsbugs in de code zelf. Met name nagerekend: het spiegelen van afslagen
+  (`MIRROR_TURN`) als je het gelopen stuk achterstevoren terugloopt. Dat klopt wiskundig exact —
+  de invoer- en uitvoerrichting van een route-segment keren allebei om, dus de afslaghoek negeert
+  precies (links↔rechts, scherp blijft scherp, flauw blijft flauw, rotonde en U-bocht blijven
+  zichzelf) — niet zomaar aangenomen, maar met de in/uit-richtingsvectoren uitgeschreven.
+- Nieuwe test toegevoegd (`tests/e2e.mjs`, "Direct terug: online (ORS), offline terugval, en
+  voltooien") die zowel het online- als offline-pad met gesimuleerde GPS-fixes echt uitloopt,
+  in plaats van alleen de code te lezen. Die test vond twee problemen — niet in de app, maar in de
+  eerste versie van de test zelf:
+  - Eerste poging testte "gelopen via Direct terug → gemarkeerd als gelopen" na pas 35% van het
+    rondje gelopen te hebben. De app markeert pas vanaf 60% (`run.back.loopAlong >= loop.geo.total
+    * 0.6`, bewust zo gebouwd) — de test moest verder lopen vóór het indrukken van de knop, niet de
+    drempel in de app verlagen.
+  - Tijdens het lopen verschuift de kaart met elke GPS-fix (`focusOn`) en vraagt Leaflet dus steeds
+    nieuwe tegels op buiten wat vooraf gecached is. De browser op "offline" zetten midden in zo'n
+    verzoek geeft in WebKit een generieke `console.error` ("internal error"), losstaand van Direct
+    terug: reproduceert identiek zonder die knop ooit aan te raken (los geverifieerd met een
+    kale Playwright-sessie: route genereren, direct offline, dezelfde foutmelding). De app vangt
+    tegelfouten al netjes af op het niveau waar de gebruiker iets ziet (`tileLayer`'s eigen
+    `tileerror`/`warnTiles`); de test filtert nu gericht alleen deze ene bekende, verwachte
+    boodschap i.p.v. de hele consolefouten-check te laten falen op iets wat geen regressie is.
+
+### Les
+Een functie die als niet-gecommitte wijziging wordt aangetroffen (bijv. uit een eerdere sessie)
+verdient dezelfde behandeling als een nieuwe: een echte testloop vóór het vertrouwen, niet alleen
+code lezen — ook als de code bij lezen al correct lijkt. Hier bleek de code zelf in orde; de
+testopzet had twee keer bijstelling nodig voordat hij de juiste dingen controleerde.

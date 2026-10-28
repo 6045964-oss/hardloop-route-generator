@@ -95,6 +95,11 @@
     wakeWarn: $('wakeWarn'),
     speechWarn: $('speechWarn'),
     btnStop: $('btnStop'),
+    btnBack: $('btnBack'),
+    backInfo: $('backInfo'),
+    backLabel: $('backLabel'),
+    backKm: $('backKm'),
+    backMin: $('backMin'),
     navIcon: $('navIcon'),
     navDist: $('navDist'),
     navWhat: $('navWhat'),
@@ -662,7 +667,7 @@
   }
 
   // Eén ORS-verzoek. Alle extra_info en de hoogte zitten in hetzelfde verzoek (buildRequest).
-  async function requestRoute(body, key, onWait = () => {}) {
+  async function requestRoute(body, key, onWait = () => {}, { minDistance = 200 } = {}) {
     await waitForOrsSlot(onWait);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ORS_TIMEOUT_MS);
@@ -704,7 +709,7 @@
     if (!Number.isFinite(distance)) {
       distance = coords.reduce((sum, c, i) => (i ? sum + haversine(coords[i - 1], c) : 0), 0);
     }
-    if (distance < 200) {
+    if (distance < minDistance) {
       throw new AppError('Geen route gevonden',
         'Er is geen bruikbaar rondje gevonden vanaf dit punt. Kies een startpunt op of vlak bij een weg of pad.', { retry: true });
     }
@@ -1788,6 +1793,9 @@
     els.statDone.textContent = nf2.format(0);
     els.statLeft.textContent = nf1.format(state.route.distance / 1000);
     els.statDev.textContent = '–';
+    els.backInfo.hidden = true;
+    els.btnBack.disabled = false;
+    els.btnBack.textContent = 'Direct terug';
 
     run.watchId = navigator.geolocation.watchPosition(onFix, onWatchError, {
       enableHighAccuracy: true,
@@ -1913,19 +1921,25 @@
       }
     }
 
-    // Rondje voltooid?
-    if (!run.finished && run.maxAlong > geo.total - 80 && run.travelled > route.distance * 0.6 && haversine(ll, route.coords[0]) < 40) {
+    // Rondje voltooid? (of: via "Direct terug" weer bij de start)
+    if (!run.finished && route.isBack && (haversine(ll, route.coords[route.coords.length - 1]) < 30 || run.maxAlong > geo.total - 25)) {
+      run.finished = true;
+      run.elapsed = Date.now() - run.startedAt;
+      if (run.back.loopAlong >= run.back.loop.geo.total * 0.6) markWalked(run.back.loop.id, run);
+      speech.say(`Terug bij de start. ${nf2.format(run.travelled / 1000)} kilometer in ${spokenDuration(run.elapsed)}.`, { interrupt: true });
+    } else if (!run.finished && !route.isBack && run.maxAlong > geo.total - 80 && run.travelled > route.distance * 0.6 && haversine(ll, route.coords[0]) < 40) {
       run.finished = true;
       run.elapsed = Date.now() - run.startedAt;
       markWalked(route.id, run);
       speech.say(`Rondje voltooid. ${nf2.format(run.travelled / 1000)} kilometer in ${spokenDuration(run.elapsed)}.`, { interrupt: true });
     }
+    if (route.isBack) updateBackInfo(run, remaining);
 
     // Scherm bijwerken
     els.statDev.textContent = String(Math.round(dev));
     els.statDone.textContent = nf2.format(run.travelled / 1000);
     els.statLeft.textContent = nf1.format(remaining / 1000);
-    if (run.finished) setRunStatus('done', 'Rondje voltooid!');
+    if (run.finished) setRunStatus('done', route.isBack ? 'Terug bij de start!' : 'Rondje voltooid!');
     else if (run.offRoute) setRunStatus('off', `Afwijking ${Math.round(dev)} m — terug naar de route`);
     else if (run.wrongWay) setRunStatus('off', 'Verkeerde richting — draai om');
     else setRunStatus('ok', 'Op route');
@@ -1960,9 +1974,11 @@
     clearInterval(run.timer);
     releaseWakeLock();
     run.elapsed = Date.now() - run.startedAt;
+    const backAlong = run.back ? run.back.loopAlong : null;
+    if (run.back) restoreLoop(run);
 
     const route = state.route;
-    const mostlyDone = route && run.maxAlong >= route.geo.total * 0.6;
+    const mostlyDone = route && (backAlong ?? run.maxAlong) >= route.geo.total * 0.6;
     if (route && !run.finished && mostlyDone) markWalked(route.id, run);
 
     state.run = null;
@@ -1987,6 +2003,125 @@
 
   els.btnStart.addEventListener('click', startRun);
   els.btnStop.addEventListener('click', () => stopRun());
+
+  // ---------------------------------------------------------------------------
+  // Direct terug: kortste weg van hier naar de start (ORS foot-walking). Zonder internet
+  // de kortste van twee: de rest van het rondje, of terug langs de al gelopen weg.
+  // ---------------------------------------------------------------------------
+  let backLayer = null;
+  const MIRROR_TURN = { 0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4, 7: 7, 9: 9, 12: 13, 13: 12 };
+  const runPace = () => (Number(prefs.pace) > 0 ? Number(prefs.pace) : 360); // sec/km; tempo uit Voorkeuren
+
+  // Navigeerbare route (zelfde vorm als een getoond rondje) uit coördinaten + afslagen.
+  function navRoute(loop, coords, distance, turns, label) {
+    const geo = prepareGeo(coords);
+    return { id: loop.id, isBack: true, label, coords, distance, steps: [], geo,
+      turns: turns.filter((t) => t.along > 5 && t.along < geo.total - 20).map((t) => ({ ...t, saidPre: false, saidNow: false })) };
+  }
+
+  // Zonder internet: rest van het rondje of terug langs de gelopen weg, wat korter is.
+  function offlineBack(loop, along) {
+    const rest = loop.geo.total - along;
+    if (rest <= along) {
+      const coords = sliceRoute(loop.geo, loop.coords, along, loop.geo.total);
+      const turns = loop.turns.map((t) => ({ ...t, along: t.along - along }));
+      return navRoute(loop, coords, loop.distance * (rest / loop.geo.total), turns, 'Terug via de rest van het rondje');
+    }
+    const coords = sliceRoute(loop.geo, loop.coords, 0, along).reverse();
+    // Achterstevoren: links wordt rechts; straatnamen kloppen dan niet meer, dus weglaten.
+    const turns = loop.turns.filter((t) => t.along < along).reverse()
+      .map((t) => ({ ...t, t: MIRROR_TURN[t.t] ?? t.t, n: '', x: 0, along: along - t.along }));
+    return navRoute(loop, coords, loop.distance * (along / loop.geo.total), turns, 'Terug langs de gelopen weg');
+  }
+
+  async function onlineBack(loop, from) {
+    const key = getApiKey();
+    if (!key || !navigator.onLine) return null;
+    const to = loop.start || loop.coords[0];
+    const cand = await requestRoute({
+      coordinates: [[from[1], from[0]], [to[1], to[0]]],
+      instructions: true,
+      instructions_format: 'text',
+      language: 'nl',
+      elevation: false,
+    }, key, () => {}, { minDistance: 0 });
+    const geo = prepareGeo(cand.coords);
+    const turns = cand.steps.map((st) => ({ ...st, along: geo.cum[clamp(st.w, 0, geo.cum.length - 1)] }));
+    return navRoute(loop, cand.coords, cand.distance, turns, 'Kortste weg terug naar de start');
+  }
+
+  function updateBackInfo(run, remaining) {
+    els.backKm.textContent = nf1.format(remaining / 1000);
+    els.backMin.textContent = String(Math.max(1, Math.round(((remaining / 1000) * runPace()) / 60)));
+    els.backLabel.textContent = run.finished ? 'Terug bij de start' : state.route.label;
+  }
+
+  function restoreLoop(run) {
+    const b = run.back;
+    if (backLayer) backLayer.clearLayers();
+    routeLayer.eachLayer((l) => { const el = l.getElement && l.getElement(); if (el) el.classList.remove('is-behind'); });
+    state.route = b.loop;
+    doneLine = b.doneLine;
+    antsLine = b.antsLine;
+    run.back = null;
+  }
+
+  async function goBack() {
+    const run = state.run;
+    if (!run || run.back || run.finished || els.btnBack.disabled) return;
+    const loop = state.route;
+    const from = state.userPos;
+    if (!from) {
+      showNotice('warn', 'Nog geen positie', 'Wacht even op je GPS-positie en tik dan opnieuw op "Direct terug".', { autoHide: 5000 });
+      return;
+    }
+    els.btnBack.disabled = true;
+    els.btnBack.textContent = 'Route terug zoeken…';
+    const along = run.maxAlong;
+    let back = null;
+    if (haversine(from, loop.start || loop.coords[0]) >= 40) {
+      try {
+        back = await onlineBack(loop, from);
+      } catch (err) {
+        back = null;
+        showNotice('warn', 'Terug zonder routeservice',
+          `${err instanceof AppError ? err.message : 'De routeservice gaf geen antwoord.'} Terug via het kortste stuk van je rondje.`, { autoHide: 7000 });
+      }
+      if (!back && !navigator.onLine) {
+        showNotice('info', 'Geen internet', 'Terug via het kortste stuk van je rondje.', { autoHide: 5000 });
+      }
+      if (!back) back = offlineBack(loop, along);
+    } else {
+      back = navRoute(loop, [from, loop.start || loop.coords[0]], haversine(from, loop.start || loop.coords[0]), [], 'Terug naar de start');
+    }
+    if (state.run !== run) return; // intussen gestopt
+
+    // Rondje gedimd laten staan; terugroute wordt de te volgen lijn.
+    run.back = { loop, loopAlong: along, doneLine, antsLine };
+    if (antsLine) antsLine.setLatLngs([]);
+    routeLayer.eachLayer((l) => { const el = l.getElement && l.getElement(); if (el) el.classList.add('is-behind'); });
+    if (!backLayer) backLayer = L.layerGroup().addTo(map);
+    backLayer.clearLayers();
+    L.polyline(back.coords, { className: 'route-casing', weight: 11, opacity: 1, interactive: false, lineJoin: 'round' }).addTo(backLayer);
+    L.polyline(back.coords, { className: 'route-back', weight: 6, opacity: 1, interactive: false, lineJoin: 'round' }).addTo(backLayer);
+    doneLine = L.polyline([], { className: 'route-done', weight: 7, opacity: 1, interactive: false, lineJoin: 'round' }).addTo(backLayer);
+    antsLine = L.polyline([], { className: 'route-ants', weight: 4, opacity: 1, interactive: false, lineJoin: 'round' }).addTo(backLayer);
+    state.route = back;
+    Object.assign(run, { maxAlong: 0, turnIdx: 0, drawnAlong: -1, rejoin: null, offRoute: false, offCount: 0, wrongWay: false, wrongCount: 0, dirAnchor: null });
+    if (guideLine) { map.removeLayer(guideLine); guideLine = null; }
+
+    els.btnBack.textContent = 'Op weg terug';
+    els.backInfo.hidden = false;
+    updateBackInfo(run, back.distance);
+    updateRouteProgress(run);
+    updateNav(run);
+    els.statLeft.textContent = nf1.format(back.distance / 1000);
+    const min = Math.max(1, Math.round(((back.distance / 1000) * runPace()) / 60));
+    speech.say(`Terug naar de start. Nog ${nf1.format(back.distance / 1000)} kilometer, ongeveer ${min} ${min === 1 ? 'minuut' : 'minuten'}.`, { interrupt: true });
+    emit('run-back', { source: back.label });
+  }
+
+  els.btnBack.addEventListener('click', goBack);
 
   // Als je de kaart zelf versleept tijdens het lopen, stopt het automatisch volgen.
   map.on('dragstart', () => {
@@ -2993,9 +3128,18 @@
 
     function mirrorRun() {
       const run = peek.querySelector('.peek__run');
-      run.querySelector('.peek__dist').textContent = els.navDist.hidden ? '' : els.navDist.textContent;
-      run.querySelector('.peek__what').textContent = els.navWhat.textContent;
-      run.querySelector('.peek__left').textContent = `Nog ${els.statLeft.textContent} km`;
+      const back = !els.backInfo.hidden;
+      // Terug naar de start: groot hoeveel km en minuten nog, daaronder de volgende afslag.
+      run.querySelector('.peek__dist').textContent = back
+        ? `${els.backKm.textContent} km · ~${els.backMin.textContent} min`
+        : (els.navDist.hidden ? '' : els.navDist.textContent);
+      run.querySelector('.peek__what').textContent = back
+        ? `${els.navDist.hidden ? '' : `${els.navDist.textContent}: `}${els.navWhat.textContent}`
+        : els.navWhat.textContent;
+      run.querySelector('.peek__left').textContent = back ? els.backLabel.textContent : `Nog ${els.statLeft.textContent} km`;
+      const btn = run.querySelector('.peek__back');
+      btn.disabled = els.btnBack.disabled;
+      btn.textContent = els.btnBack.textContent;
       run.dataset.state = els.runStatus.dataset.state;
     }
 
@@ -3074,7 +3218,10 @@
           </div>
           <div class="peek__run" hidden>
             <p class="peek__text"><span class="peek__dist"></span><span class="peek__what"></span><span class="peek__left"></span></p>
-            <button type="button" class="btn btn--stop peek__stop">Stop</button>
+            <div class="peek__btns">
+              <button type="button" class="btn btn--back peek__back">Direct terug</button>
+              <button type="button" class="btn btn--stop peek__stop">Stop</button>
+            </div>
           </div>`;
         els.notice.after(peek);
         peek.querySelector('.peek__go').addEventListener('click', () => {
@@ -3082,6 +3229,7 @@
           else els.btnGenerate.click();
         });
         peek.querySelector('.peek__stop').addEventListener('click', () => els.btnStop.click());
+        peek.querySelector('.peek__back').addEventListener('click', () => els.btnBack.click());
 
         handle.addEventListener('click', () => {
           if (performance.now() - lastDragEnd < 350) return;
@@ -3115,7 +3263,9 @@
 
         // Balk tijdens het lopen meelaten lopen met de navigatie
         new MutationObserver(() => { if (state.run && snap === 'collapsed') mirrorRun(); })
-          .observe(els.runView, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-state'] });
+          .observe(els.runView, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-state', 'hidden', 'disabled'] });
+        // Andere hoogte van de balk (terug-info, twee knoppen): ingeklapte stand bijwerken
+        document.addEventListener('hrg:run-back', () => { if (snap === 'collapsed') { mirrorRun(); snapTo('collapsed', { animate: false }); } });
         // Melding verschijnt/verdwijnt, of zoeken klaar: ingeklapte hoogte opnieuw
         new MutationObserver(() => {
           if (snap !== 'collapsed') return;
