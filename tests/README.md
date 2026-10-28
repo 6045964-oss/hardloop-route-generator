@@ -2,6 +2,20 @@
 
 `e2e.mjs` test de app in echte WebKit met iPhone-emulatie (Playwright): service worker,
 update-melding, route genereren, kaarttegels, en elke voorkeur/functie in een eigen blok.
+Gebruikt naast de nep-ORS (`fake-ors.mjs`) ook een nep-Overpass (`fake-overpass.mjs`): een klein
+stratenrastertje met een rustige/landelijke en een drukke/bebouwde helft, zodat getest kan worden
+dat voorkeuren de richting écht sturen (zie de test "route plannen") zonder van de echte,
+publieke Overpass-servers afhankelijk te zijn — die weren verkeer uit datacenters sowieso vaak
+als anti-misbruikmaatregel.
+
+`field-check.mjs` is geen geautomatiseerde test (geen pass/fail): het genereert routes vanaf een
+echt startpunt met de ECHTE OpenRouteService- én Overpass-diensten, en drukt een tabel af
+(afstand, platteland-aandeel, bochten/km, dubbel gelopen meters, generatietijd) voor 5/10/15 km ×
+Platteland aan/uit × Weinig bochten aan/uit. **Draai dit vanaf een gewone internetverbinding**
+(thuis, 4G/5G) — niet vanuit een CI-server of cloud-sandbox: de publieke Overpass-servers
+blokkeren datacenter-IP's vaak, waardoor alles dan stil terugvalt op een ongestuurde round trip
+en de cijfers niets zeggen. Gebruik: `HRG_ORS_KEY=… PW=… node tests/field-check.mjs`
+(`--start=lat,lng` en `--km=5,10,15` zijn optioneel).
 
 Playwright staat bewust níet in het project. Installeer het eenmalig in een losse map:
 

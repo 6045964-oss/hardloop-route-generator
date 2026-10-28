@@ -11,6 +11,7 @@ import { join, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { installFakeOrs } from './fake-ors.mjs';
+import { installFakeOverpass } from './fake-overpass.mjs';
 
 const { webkit, devices } = await import(process.env.PW || 'playwright');
 
@@ -60,7 +61,7 @@ const browser = await webkit.launch();
 const realCalls = []; // tijdstippen van echte ORS-verzoeken, om de minuutlimiet te respecteren
 
 // Nieuwe iPhone-context (verse localStorage) met nep-ORS, of echte ORS bij --real.
-async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL, key = true, wakeLock = null, fakeGps = false } = {}) {
+async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceWorkers = 'block', fake = {}, realOrs = REAL, key = true, wakeLock = null, fakeGps = false, osm = {} } = {}) {
   const context = await browser.newContext({
     ...devices['iPhone 13'],
     ...(viewport ? { viewport } : {}),
@@ -70,9 +71,15 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
     serviceWorkers,
   });
   const calls = [];
+  const osmCalls = [];
   // Let op: met een actieve service worker omzeilen verzoeken in WebKit de onderschepping
   // van Playwright. Tests mét service worker gebruiken daarom de echte ORS en tegels.
-  if (!realOrs) await installFakeOrs(context, calls, fake);
+  if (!realOrs) {
+    await installFakeOrs(context, calls, fake);
+    // Zelfde reden als nep-ORS: snel, gratis, voorspelbaar, en de echte Overpass-servers
+    // weren verkeer uit datacenters toch al vaak (anti-misbruik), dus hier altijd nep.
+    await installFakeOverpass(context, osmCalls, osm);
+  }
   await context.route(/tile\.openstreetmap\.org/, (r) => (realOrs ? r.continue()
     : r.fulfill({ status: 200, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' }, body: TILE_PNG })));
   // Sleutel alleen in deze test-browser, zoals de app hem op het apparaat bewaart: echt via
@@ -99,7 +106,7 @@ async function openApp({ start = 'utrecht', scheme = 'light', viewport, serviceW
   await page.goto(BASE);
   await page.waitForFunction(() => document.getElementById('btnGenerate') && !document.getElementById('btnGenerate').disabled);
   await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
-  return { context, page, calls, errors };
+  return { context, page, calls, errors, osmCalls };
 }
 
 function hasRealKey(what) {
@@ -327,6 +334,60 @@ test('voorkeur 1: platteland', async () => {
   await context.close();
 });
 
+
+// ---------------------------------------------------------------------------
+// v1.4.0 — route plannen op OSM-data (Overpass), vóór het eerste ORS-verzoek
+// (eigen blok; los terug te draaien via de bijbehorende commit)
+// ---------------------------------------------------------------------------
+test('route plannen: Overpass stuurt de richting, niet alleen achteraf scoren', async () => {
+  const { context, page, calls, osmCalls, errors } = await openApp({ start: 'alphen' });
+
+  // Geen relevante voorkeur actief: geen Overpass-aanvraag, gewone round trip.
+  await generate(page, 6);
+  check(osmCalls.length === 0, `geen voorkeur actief: geen Overpass-aanvraag (${osmCalls.length})`);
+  check((calls[calls.length - 1].body.coordinates || []).length === 1,
+    `gewone round trip: 1 coördinaat in het verzoek (${(calls[calls.length - 1].body.coordinates || []).length})`);
+
+  // Platteland + rustige wegen aan: nu wél Overpass, en de gekozen tussenpunten liggen
+  // overwegend aan de oostkant (het rustige/landelijke stratenraster in de nep-Overpass,
+  // zie tests/fake-overpass.mjs: oost = residential/farmland, west = secondary/bebouwd).
+  await setSwitch(page, 'rural', true);
+  await setSwitch(page, 'quiet', true);
+  const before = osmCalls.length;
+  const N = 8;
+  let eastCount = 0;
+  for (let i = 0; i < N; i++) {
+    await generate(page);
+    const body = calls[calls.length - 1].body;
+    check(Array.isArray(body.coordinates) && body.coordinates.length >= 3 && !body.options,
+      `poging ${i + 1}: puntenroute met tussenpunten, geen round_trip (${body.coordinates ? body.coordinates.length : 0} punten)`);
+    const interior = body.coordinates.slice(1, -1);
+    const avgLng = interior.reduce((s, c) => s + c[0], 0) / interior.length;
+    if (avgLng > STARTS.alphen.longitude) eastCount++;
+  }
+  check(osmCalls.length > before, `Overpass wél aangevraagd met platteland/rustige wegen aan (${osmCalls.length - before} nieuwe aanvragen)`);
+  // Duidelijke meerderheid oostwaarts (nooit 100%: het nep-rasternetje heeft alleen
+  // noord/zuid/oost/west-wegen, dus een gekozen richting rond noord of zuid — ook een
+  // "goede" sector, met wat oostelijke weging op de rand — geeft via zo'n haaks rasternetje
+  // zelf maar een zwak oostwaarts signaal; op een echt wegennet met wegen in alle hoeken
+  // speelt dat niet zo sterk). 55% ligt ruim boven de 50% van "geen signaal".
+  check(eastCount >= N * 0.55, `tussenpunten leunen naar de rustige/landelijke oostkant: ${eastCount}/${N} pogingen`);
+
+  // Een zelfgekozen via-punt gaat voor, ook met rural/quiet nog aan: geen Overpass meer.
+  await page.evaluate(() => {
+    const prefs = JSON.parse(localStorage.getItem('hrg.prefs.v1') || '{}');
+    prefs.via = [52.135, 4.660];
+    localStorage.setItem('hrg.prefs.v1', JSON.stringify(prefs));
+  });
+  await page.reload();
+  await page.waitForFunction(() => /locatie/i.test(document.getElementById('startLabel').textContent));
+  const beforeVia = osmCalls.length;
+  await generate(page, 6);
+  check(osmCalls.length === beforeVia, `via-punt gaat voor: geen nieuwe Overpass-aanvraag (${osmCalls.length - beforeVia})`);
+
+  check(errors.length === 0, `geen consolefouten${errors.length ? `: ${errors.join(' | ')}` : ''}`);
+  await context.close();
+});
 
 // ---------------------------------------------------------------------------
 // Voorkeur 2: weinig bochten
